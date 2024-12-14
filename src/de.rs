@@ -2,6 +2,7 @@
 //! of [`serde::Deserializer`].
 
 use core::fmt::{self, Formatter};
+use core::marker::PhantomData;
 use core::mem;
 
 #[cfg(all(not(feature = "std"), feature = "alloc"))]
@@ -617,50 +618,6 @@ impl<'de, D: de::Deserializer<'de>> Deserializer<'de> for Option<D> {
     }
 }
 
-impl<'de, A: de::SeqAccess<'de>> SeqAccess<'de> for A {
-    #[inline]
-    fn next_element_dyn(
-        &mut self,
-        seed: &mut dyn DeserializeSeed<'de>,
-    ) -> Result<Option<()>, Error> {
-        self.next_element_seed(seed).map_err(de::Error::custom)
-    }
-
-    #[inline]
-    fn size_hint_dyn(&self) -> Option<usize> {
-        self.size_hint()
-    }
-}
-
-impl<'de, A: de::MapAccess<'de>> MapAccess<'de> for A {
-    #[inline]
-    fn next_key_dyn(&mut self, seed: &mut dyn DeserializeSeed<'de>) -> Result<Option<()>, Error> {
-        self.next_key_seed(seed).map_err(de::Error::custom)
-    }
-
-    #[inline]
-    fn next_value_dyn(&mut self, seed: &mut dyn DeserializeSeed<'de>) -> Result<(), Error> {
-        self.next_value_seed(seed).map_err(de::Error::custom)
-    }
-
-    fn next_entry_dyn(
-        &mut self,
-        kseed: &mut dyn DeserializeSeed<'de>,
-        vseed: &mut dyn DeserializeSeed<'de>,
-    ) -> Result<Option<()>, Error> {
-        match self.next_entry_seed(kseed, vseed) {
-            Ok(Some(_)) => Ok(Some(())),
-            Ok(None) => Ok(None),
-            Err(err) => Err(de::Error::custom(err)),
-        }
-    }
-
-    #[inline]
-    fn size_hint_dyn(&self) -> Option<usize> {
-        self.size_hint()
-    }
-}
-
 // /////////////////////////////////////////////////////////////////////////////
 // TRAIT OBJECT IMPLEMENTATION
 // /////////////////////////////////////////////////////////////////////////////
@@ -1193,25 +1150,32 @@ impl<'de> de::Visitor<'de> for &mut dyn Visitor<'de> {
             .map_err(Error::into_de_error)
     }
 
-    #[inline]
-    fn visit_seq<A>(self, mut access: A) -> Result<Self::Value, A::Error>
+    fn visit_seq<A>(self, access: A) -> Result<Self::Value, A::Error>
     where
         A: de::SeqAccess<'de>,
     {
+        let mut access = MakeSeqAccess {
+            access,
+            marker: PhantomData,
+        };
+
         self.visit_seq_dyn(&mut access)
             .map_err(Error::into_de_error)
     }
 
-    #[inline]
-    fn visit_map<A>(self, mut access: A) -> Result<Self::Value, A::Error>
+    fn visit_map<A>(self, access: A) -> Result<Self::Value, A::Error>
     where
         A: de::MapAccess<'de>,
     {
+        let mut access = MakeMapAccess {
+            access,
+            marker: PhantomData,
+        };
+
         self.visit_map_dyn(&mut access)
             .map_err(Error::into_de_error)
     }
 
-    #[inline]
     fn visit_enum<A>(self, access: A) -> Result<Self::Value, A::Error>
     where
         A: de::EnumAccess<'de>,
@@ -1545,6 +1509,64 @@ impl<'de, T: de::Visitor<'de>> Visitor<'de> for MakeVisitor<'de, T> {
         self.take()?
             .visit_enum(access)
             .map(|value| self.write(value))
+    }
+}
+
+/// This `struct` is the only implementation of [`SeqAccess`].
+struct MakeSeqAccess<'de, A: de::SeqAccess<'de>> {
+    access: A,
+    marker: PhantomData<A::Error>,
+}
+
+impl<'de, A: de::SeqAccess<'de>> SeqAccess<'de> for MakeSeqAccess<'de, A> {
+    #[inline]
+    fn next_element_dyn(
+        &mut self,
+        seed: &mut dyn DeserializeSeed<'de>,
+    ) -> Result<Option<()>, Error> {
+        self.access
+            .next_element_seed(seed)
+            .map_err(de::Error::custom)
+    }
+
+    #[inline]
+    fn size_hint_dyn(&self) -> Option<usize> {
+        self.access.size_hint()
+    }
+}
+
+/// This `struct` is the only implementation of [`MapAccess`].
+struct MakeMapAccess<'de, A: de::MapAccess<'de>> {
+    access: A,
+    marker: PhantomData<A::Error>,
+}
+
+impl<'de, A: de::MapAccess<'de>> MapAccess<'de> for MakeMapAccess<'de, A> {
+    #[inline]
+    fn next_key_dyn(&mut self, seed: &mut dyn DeserializeSeed<'de>) -> Result<Option<()>, Error> {
+        self.access.next_key_seed(seed).map_err(de::Error::custom)
+    }
+
+    #[inline]
+    fn next_value_dyn(&mut self, seed: &mut dyn DeserializeSeed<'de>) -> Result<(), Error> {
+        self.access.next_value_seed(seed).map_err(de::Error::custom)
+    }
+
+    fn next_entry_dyn(
+        &mut self,
+        kseed: &mut dyn DeserializeSeed<'de>,
+        vseed: &mut dyn DeserializeSeed<'de>,
+    ) -> Result<Option<()>, Error> {
+        match self.access.next_entry_seed(kseed, vseed) {
+            Ok(Some(_)) => Ok(Some(())),
+            Ok(None) => Ok(None),
+            Err(err) => Err(de::Error::custom(err)),
+        }
+    }
+
+    #[inline]
+    fn size_hint_dyn(&self) -> Option<usize> {
+        self.access.size_hint()
     }
 }
 
