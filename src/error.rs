@@ -1,33 +1,31 @@
-//! This module provides a non-generic error type for the failure of the dynamic
-//! serialization or deserialization.
+//! This module provides a non-generic error type ([`Error`]) for the failure
+//! of the dynamic serialization or deserialization.
 
 use core::error;
 use core::fmt::{self, Debug, Display, Formatter};
 
 use serde::{de, ser};
 
-/// Type alias that is a [result][core::result::Result] type with an error type
-/// of [`Error`].
-pub type Result<T> = core::result::Result<T, Error>;
-
 /// An error that is returned on the failure of the dynamic serialization or
 /// deserialization.
 ///
 /// # Representation
 ///
-/// This `struct` has two representations, controlled by feature `error`.
+/// This `struct` has two representations.
 ///
-/// | Feature `error` | Memory Layout of `Error` |
-/// | --------------- | ------------------------ |
-/// | Yes             | same as a pointer        |
-/// | No              | same as unit `()`        |
+/// | Feature                 | Memory Layout of `Error` |
+/// | ----------------------- | ------------------------ |
+/// | Either `std` or `alloc` | same as a pointer        |
+/// | Otherwise               | same as unit `()`        |
 ///
-/// * If feature `error` is enabled (default), error messages provided by
-///   concrete (de)serializer are boxed and held by this struct;
+/// * If either feature `std` (default) or feature `alloc` is enabled, error
+///   messages provided by concrete (de)serializer are boxed and held by this
+///   `struct`;
 ///
-/// * If feature `error` is disabled, the `struct Error` is just a marker
-///   indicating the failure of the dynamic (de)serialization. Error messages
-///   provided by concrete (de)serializer are discarded;
+/// * If both features `std` and `alloc` are disabled, this `struct` is
+///   equivalent to a unit value, representing the failure of the dynamic
+///   serialization or deserialization. And error messages provided by concrete
+///   serializer or deserializer would be discarded;
 pub struct Error {
     repr: repr::Repr,
 }
@@ -55,9 +53,9 @@ impl Default for Error {
     #[inline(never)]
     fn default() -> Self {
         Error {
-            #[cfg(feature = "error")]
+            #[cfg(any(feature = "std", feature = "alloc"))]
             repr: repr::Repr::default(),
-            #[cfg(not(feature = "error"))]
+            #[cfg(not(any(feature = "std", feature = "alloc")))]
             repr: repr::Repr,
         }
     }
@@ -155,96 +153,17 @@ impl de::Error for Error {
     }
 }
 
-#[cfg(not(feature = "error"))]
+#[cfg(any(feature = "std", feature = "alloc"))]
 mod repr {
     use core::error;
     use core::fmt::{self, Debug, Display, Formatter};
-
-    use serde::{de, ser};
-
-    pub struct Repr;
-
-    impl Repr {
-        pub fn into_de_error<E: de::Error>(self) -> E {
-            E::custom(self)
-        }
-    }
-
-    impl Debug for Repr {
-        fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-            f.write_str("Error")
-        }
-    }
-
-    impl Display for Repr {
-        fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-            f.write_str("an error occurred during dynamic (de)serialization")
-        }
-    }
-
-    impl error::Error for Repr {}
-
-    impl ser::Error for Repr {
-        #[inline]
-        fn custom<T: Display>(_: T) -> Self {
-            Repr
-        }
-    }
-
-    impl de::Error for Repr {
-        #[inline]
-        fn custom<T: Display>(_: T) -> Self {
-            Repr
-        }
-
-        #[inline]
-        fn invalid_type(_: de::Unexpected, _: &dyn de::Expected) -> Self {
-            Repr
-        }
-
-        #[inline]
-        fn invalid_value(_: de::Unexpected, _: &dyn de::Expected) -> Self {
-            Repr
-        }
-
-        #[inline]
-        fn invalid_length(_: usize, _: &dyn de::Expected) -> Self {
-            Repr
-        }
-
-        #[inline]
-        fn unknown_variant(_: &str, _: &'static [&'static str]) -> Self {
-            Repr
-        }
-
-        #[inline]
-        fn unknown_field(_: &str, _: &'static [&'static str]) -> Self {
-            Repr
-        }
-
-        #[inline]
-        fn missing_field(_: &'static str) -> Self {
-            Repr
-        }
-
-        #[inline]
-        fn duplicate_field(_: &'static str) -> Self {
-            Repr
-        }
-    }
-}
-
-#[cfg(feature = "error")]
-mod repr {
-    use core::error;
-    use core::fmt::{self, Debug, Display, Formatter};
-
-    use serde::{de, ser};
 
     #[cfg(not(feature = "std"))]
     use alloc::{boxed::Box, string::ToString};
     #[cfg(feature = "std")]
     use std::{boxed::Box, string::ToString};
+
+    use serde::{de, ser};
 
     pub struct Repr {
         repr: Option<Box<ErrorCode>>,
@@ -611,6 +530,85 @@ mod repr {
                 Unexpected::StructVariant => de::Unexpected::StructVariant,
                 Unexpected::Other(v) => de::Unexpected::Other(v),
             }
+        }
+    }
+}
+
+#[cfg(not(any(feature = "std", feature = "alloc")))]
+mod repr {
+    use core::error;
+    use core::fmt::{self, Debug, Display, Formatter};
+
+    use serde::{de, ser};
+
+    pub struct Repr;
+
+    impl Repr {
+        pub fn into_de_error<E: de::Error>(self) -> E {
+            E::custom(self)
+        }
+    }
+
+    impl Debug for Repr {
+        fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+            f.write_str("Error")
+        }
+    }
+
+    impl Display for Repr {
+        fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+            f.write_str("an error occurred during dynamic (de)serialization")
+        }
+    }
+
+    impl error::Error for Repr {}
+
+    impl ser::Error for Repr {
+        #[inline]
+        fn custom<T: Display>(_: T) -> Self {
+            Repr
+        }
+    }
+
+    impl de::Error for Repr {
+        #[inline]
+        fn custom<T: Display>(_: T) -> Self {
+            Repr
+        }
+
+        #[inline]
+        fn invalid_type(_: de::Unexpected, _: &dyn de::Expected) -> Self {
+            Repr
+        }
+
+        #[inline]
+        fn invalid_value(_: de::Unexpected, _: &dyn de::Expected) -> Self {
+            Repr
+        }
+
+        #[inline]
+        fn invalid_length(_: usize, _: &dyn de::Expected) -> Self {
+            Repr
+        }
+
+        #[inline]
+        fn unknown_variant(_: &str, _: &'static [&'static str]) -> Self {
+            Repr
+        }
+
+        #[inline]
+        fn unknown_field(_: &str, _: &'static [&'static str]) -> Self {
+            Repr
+        }
+
+        #[inline]
+        fn missing_field(_: &'static str) -> Self {
+            Repr
+        }
+
+        #[inline]
+        fn duplicate_field(_: &'static str) -> Self {
+            Repr
         }
     }
 }

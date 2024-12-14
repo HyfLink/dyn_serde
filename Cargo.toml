@@ -11,11 +11,9 @@ keywords = ["serde", "no_std"]
 categories = ["encoding", "no-std"]
 
 [features]
-default = ["error"]
+default = ["std"]
 std = ["serde/std"]
-# Disabling this feature will discard the error message on the failure of the
-# dynamic serialization and deserialization.
-error = []
+alloc = ["serde/alloc"]
 
 [dependencies]
 serde = { version = "1.0.216", default-features = false }
