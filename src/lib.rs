@@ -20,7 +20,11 @@
 //!     `serde::Deserializer` by method [`<dyn Deserializer>::new`];
 //!
 //!   * The trait object `dyn Deserializer` also implements `serde::Deserializer`;
-//!
+//! 
+//! This crate is has basically the same functionality with `erased_serde`. For
+//! more information, see [`README.md`].
+//! 
+//! [`README.md`]: https://crates.io/crates/dyn_serde
 //! [`<dyn Serializer>::new`]: trait.Serializer.html#method.new
 //! [`<dyn Deserializer>::new`]: trait.Deserializer.html#method.new
 //!

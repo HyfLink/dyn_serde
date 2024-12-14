@@ -5,6 +5,7 @@ authors = ["Huang Yifan"]
 edition = "2021"
 description = "dynamic serialization and deserialization based on serde"
 readme = "README.md"
+homepage = "https://crates.io/crates/dyn_serde"
 repository = "https://github.com/HyfLink/dyn_serde"
 documentation = "https://docs.rs/dyn_serde"
 license = "MIT OR Apache-2.0"
