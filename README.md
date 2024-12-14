@@ -93,7 +93,7 @@ Also, there are still some unimplemented functionalities:
 
 ## Performance
 
-`bench/de.rs` is a simple benchmark that tests the deserialization performance of `serde_json` (version 0.4.5, default features), `erased-serde` (version 1.0.133, default features) and `dyn_serde` (version 1.0.0, default features).
+`bench/de.rs` is a simple benchmark that tests the deserialization performance of `serde_json` (version 0.4.5, default features), `erased-serde` (version 1.0.133, default features) and `dyn_serde` (version 1.0.1, default features).
 
 - benchmark tool: [`criterion.rs`].
 
