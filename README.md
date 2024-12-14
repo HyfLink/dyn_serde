@@ -69,11 +69,13 @@ This crate (`dyn_serde`) is aimed at learning [`erased_serde`], which is license
 
 And `dyn_serde` has made many improvements:
 
+1. `dyn_serde` supports "no-std" and "no-alloc".
+
 1. In the deserialization `erased_serde` uses a carefully maintained object `Any` to represent the deserialized value, which may need to perform memory management (and produces a lot of unsafe codes). But `dyn_serde` performs in-place deserialization and does not need any memory allocation.
 
-2. Based to the above improvements, `dyn_serde` gets rid of all unsafe codes.
+1. Based to the above improvements, `dyn_serde` gets rid of all unsafe codes.
 
-3. &hellip;&hellip;
+1. &hellip;&hellip;
 
 Also, there are still some unimplemented functionalities:
 
@@ -83,13 +85,50 @@ Also, there are still some unimplemented functionalities:
 
 2. `erased_serde` provides macro `serialize_trait_object!` for implementing `serde::Serialize` for trait objects.
 
-   Currently no plan to do this.
-
 3. `dyn_serde` needs more detailed error messages.
 
 4. &hellip;&hellip;
 
 [`erased_serde`]: https://github.com/dtolnay/erased-serde/
+
+## Performance
+
+`bench/de.rs` is a simple benchmark that tests the deserialization performance of `serde_json` (version 0.4.5, default features), `erased-serde` (version 1.0.133, default features) and `dyn_serde` (version 1.0.0, default features).
+
+- benchmark tool: [`criterion.rs`].
+
+- data ([twiter.json], ~620 KiB) is from [nativejson-benchmark].
+
+- cargo/rustc: version 1.83.0.
+
+Following output shows, the dynamic deserializer defined in `dyn_serde` has much lower overhead (`4.0915 / 3.6208 = 1.123`) than `erased_serde` (`6.4764 / 3.6208 = 1.789`).
+
+```text
+$ cargo bench de
+
+serde-json              time:   [3.5854 ms 3.6208 ms 3.6587 ms]
+                        change: [-0.8127% +0.5305% +1.9817%] (p = 0.47 > 0.05)
+                        No change in performance detected.
+Found 2 outliers among 100 measurements (2.00%)
+  2 (2.00%) high mild
+
+dyn-serde               time:   [4.0693 ms 4.0915 ms 4.1174 ms]
+                        change: [-0.4532% +0.3426% +1.1811%] (p = 0.40 > 0.05)
+                        No change in performance detected.
+Found 8 outliers among 100 measurements (8.00%)
+  2 (2.00%) high mild
+  6 (6.00%) high severe
+
+erased-serde            time:   [6.4466 ms 6.4764 ms 6.5231 ms]
+                        change: [-0.3880% +0.1163% +0.9587%] (p = 0.77 > 0.05)
+                        No change in performance detected.
+Found 2 outliers among 100 measurements (2.00%)
+  2 (2.00%) high severe
+```
+
+[`criterion.rs`]: https://github.com/bheisler/criterion.rs
+[twiter.json]: https://github.com/miloyip/nativejson-benchmark/blob/master/data/twitter.json
+[nativejson-benchmark]: https://github.com/miloyip/nativejson-benchmark
 
 ## No-std support
 
