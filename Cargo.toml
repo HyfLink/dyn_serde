@@ -8,12 +8,14 @@ readme = "README.md"
 repository = "https://github.com/HyfLink/dyn_serde"
 license = "MIT OR Apache-2.0"
 keywords = ["serde", "no_std"]
-categories = ["encoding", "no-std", "no-std::no-alloc"]
+categories = ["encoding", "no-std"]
 
 [features]
-default = ["std"]
+default = ["error"]
 std = ["serde/std"]
-alloc = ["serde/alloc"]
+# Disabling this feature will discard the error message on the failure of the
+# dynamic serialization and deserialization.
+error = []
 
 [dependencies]
 serde = { version = "1.0.216", default-features = false }
