@@ -1,6 +1,6 @@
 [package]
 name = "dyn_serde"
-version = "1.0.2"
+version = "1.1.0"
 authors = ["Huang Yifan"]
 edition = "2021"
 description = "dynamic serialization and deserialization based on serde"
@@ -10,20 +10,28 @@ repository = "https://github.com/HyfLink/dyn_serde"
 documentation = "https://docs.rs/dyn_serde"
 license = "MIT OR Apache-2.0"
 keywords = ["serde", "no_std"]
-categories = ["encoding", "no-std", "no-std::no-alloc"]
+categories = ["encoding", "no-std"]
 
 [features]
-default = ["std"]
+default = []
 std = ["serde/std"]
-alloc = ["serde/alloc"]
 
 [dependencies]
-serde = { version = "1.0.216", default-features = false }
+[dependencies.serde]
+version = "1.0"
+default-features = false
+features = ["alloc"]
 
 [dev-dependencies]
-criterion = { version = "0.5.1", features = ["html_reports"] }
-erased-serde = "0.4.5"
-serde_json = "1.0.133"
+criterion = { version = "0.7.0", features = ["html_reports"] }
+erased-serde = "0.4.6"
+
+[dev-dependencies.serde]
+version = "1.0"
+features = ["derive"]
+
+[dev-dependencies.serde_json]
+version = "1.0"
 
 [[bench]]
 name = "de"

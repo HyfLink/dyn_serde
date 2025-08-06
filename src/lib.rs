@@ -20,10 +20,10 @@
 //!     `serde::Deserializer` by method [`<dyn Deserializer>::new`];
 //!
 //!   * The trait object `dyn Deserializer` also implements `serde::Deserializer`;
-//! 
+//!
 //! This crate is has basically the same functionality with `erased_serde`. For
 //! more information, see [`README.md`].
-//! 
+//!
 //! [`README.md`]: https://crates.io/crates/dyn_serde
 //! [`<dyn Serializer>::new`]: trait.Serializer.html#method.new
 //! [`<dyn Deserializer>::new`]: trait.Deserializer.html#method.new
@@ -65,14 +65,14 @@
 //! ```
 
 #![cfg_attr(not(feature = "std"), no_std)]
+#![warn(missing_docs)]
 
-#[cfg(all(not(feature = "std"), feature = "alloc"))]
+#[cfg(not(feature = "std"))]
 extern crate alloc;
 #[cfg(feature = "std")]
 extern crate std;
 
 pub mod de;
-pub mod error;
 pub mod ser;
 
 // re-exports

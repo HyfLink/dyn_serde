@@ -1,1325 +1,1518 @@
-//! This module provides [`Serialize`] and [`Serializer`], which are the
-//! dyn-compatible version of [`serde::Serialize`] and [`serde::Serializer`].
+//! For dynamic serialization, see [`Serialize`] and [`Serializer`].
 
-use core::fmt::Display;
+use core::error::Error;
+use core::fmt::{self, Debug, Display, Formatter};
 use core::mem;
 
+#[cfg(not(feature = "std"))]
+use alloc::boxed::Box;
+#[cfg(not(feature = "std"))]
+use alloc::string::{String, ToString};
+
 use serde::ser;
+use serde::ser::Error as SerError;
+use serde::ser::SerializeMap as _;
+use serde::ser::SerializeSeq as _;
+use serde::ser::SerializeStruct as _;
+use serde::ser::SerializeStructVariant as _;
+use serde::ser::SerializeTuple as _;
+use serde::ser::SerializeTupleStruct as _;
+use serde::ser::SerializeTupleVariant as _;
 
-use crate::error::Error;
-
-/// The dyn-compatible version of [`serde::Serialize`].
+/// The result type returned by [`dyn Serializer`]'s methods.
 ///
-/// One should avoid implementing [`Serialize`] and implement
+/// [`dyn Serializer`]: Serializer
+pub type SerializeResult<T> = Result<T, SerializeError>;
+
+/// The result type returned by [`InplaceSerializer`]'s methods.
+pub type InplaceSerializeResult<T> = Result<T, InplaceSerializeError>;
+
+/// The dyn-compatible version of trait [`serde::Serialize`].
+///
+/// One should avoid implementing `Serialize` manually and implement
 /// [`serde::Serialize`] instead. Implementing [`serde::Serialize`]
 /// automatically provides one with an implementation of [`Serialize`].
 ///
-/// # Example
+/// # Examples
 ///
 /// Values implementing [`serde::Serialize`] can be converted into `dyn
-/// Serialize`, which also implements [`serde::Serialize`].
+/// Serialize`. The trait object also implements [`serde::Serialize`].
 ///
 /// ```
-/// use dyn_serde::Serialize;
+/// # use serde::Serialize;
+/// #
+/// let mut buf = Vec::new();
+/// let writer = std::io::Cursor::new(&mut buf);
+/// let mut serializer = serde_json::Serializer::new(writer);
 ///
-/// let values: &[&dyn Serialize] = &[
-///     &false,
-///     &123u32,
+/// // Let's serialize a heterogeneous array.
+/// let value = [
+///     &-3.1415926f64 as &dyn dyn_serde::Serialize,
 ///     &"Hello, world!",
+///     &false,
+///     &b"\x01\x02\x03",
+///     &Option::<String>::None,
 /// ];
-/// let json = serde_json::to_string(values).unwrap();
-/// assert_eq!(json, "[false,123,\"Hello, world!\"]");
+///
+/// // Use `serde::Serialize`.
+/// value.serialize(&mut serializer).unwrap();
+///
+/// assert_eq!(buf, b"[-3.1415926,\"Hello, world!\",false,[1,2,3],null]");
 /// ```
+#[diagnostic::on_unimplemented(note = "Consider implementing `serde::Serialize` for `{Self}`")]
 pub trait Serialize {
-    /// Serializes this value into the given dynamic serializer.
+    /// Serialize the `self` value with the given dynamic `serializer`.
     ///
-    /// # Errors
-    ///
-    /// This method would return an [`Error`] if the serialization implemented
-    /// by [`serde::Serialize::serialize`] fails; Or the dynamic serializer has
-    /// been consumed.
-    fn serialize_dyn(&self, serializer: &mut dyn Serializer) -> Result<(), Error>;
+    /// This function is equivalent to [`serde::Serialize::serialize`] thanks
+    /// to the implementation of [`serde::Serializer`] on `&mut dyn Serializer`.
+    fn dyn_serialize(&self, serializer: &mut dyn Serializer) -> SerializeResult<()>;
 }
 
-/// The dyn-compatible version of [`serde::Serializer`].
+/// The dyn-compatible version of trait [`serde::Serializer`].
 ///
-/// # Example
+/// One should avoid implementing `Serializer` manually and use
+/// `<dyn Serializer>::new` to construct an instance instead.
 ///
-/// To construct dynamic serializer, use `<dyn Serializer>::new` instead of
-/// implementing manually.
-///
-/// ```
-/// use dyn_serde::Serializer;
-///
-/// let stdout = std::io::stdout();
-/// let mut serializer = serde_json::Serializer::new(stdout.lock());
-/// let serializer = <dyn Serializer>::new(&mut serializer);
-/// let serializer: Box<dyn Serializer> = Box::new(serializer);
-/// # let _ = serializer;
-/// ```
-///
-/// The trait object `dyn Serializer` also implements [`serde::Serializer`].
+/// # Examples
 ///
 /// ```
-/// use serde::Serialize;
-/// use dyn_serde::Serializer;
+/// # use serde::ser::{Serializer, SerializeSeq};
+/// let mut buf = Vec::new();
+/// let mut serializer = serde_json::Serializer::new(std::io::Cursor::new(&mut buf));
+/// let mut inplace_serializer = <dyn dyn_serde::Serializer>::new(&mut serializer);
+/// let serializer = &mut inplace_serializer as &mut dyn dyn_serde::Serializer;
 ///
-/// // Serializes to stdout.
-/// let stdout = std::io::stdout();
-/// let mut serializer1 = serde_json::Serializer::new(stdout.lock());
-/// let mut serializer1 = <dyn Serializer>::new(&mut serializer1);
+/// // Serializes a heterogeneous array using `serde::Serializer` and
+/// // `serde::ser::SerializeSeq`.
+/// let mut seq = serializer.serialize_seq(Some(5)).unwrap();
+/// seq.serialize_element(&-3.1415926f64).unwrap();
+/// seq.serialize_element(&"Hello, world!").unwrap();
+/// seq.serialize_element(&false).unwrap();
+/// seq.serialize_element(&b"\x01\x02\x03").unwrap();
+/// seq.serialize_element(&Option::<String>::None).unwrap();
+/// let result = seq.end();
+/// assert!(result.is_ok());
 ///
-/// // Serializes to buffer.
-/// let mut buffer = Vec::with_capacity(64);
-/// let mut serializer2 = serde_json::Serializer::new(std::io::Cursor::new(&mut buffer));
-/// let mut serializer2 = <dyn Serializer>::new(&mut serializer2);
+/// // Now `inplace_serializer` becomes `InplaceSerializer::Ok(_)` or `Error(_)`.
+/// // And continue to use `serializer` would cause an error.
+/// assert!(serializer.serialize_i32(0).is_err());
+/// assert!(serializer.serialize_bool(true).is_err());
 ///
-/// let mut serializers: [&mut dyn Serializer; 2] = [
-///     &mut serializer1,
-///     &mut serializer2,
-/// ];
-/// let value = "Hello, world!";
-/// for serializer in serializers {
-///     value.serialize(serializer).unwrap();
-/// }
-/// assert_eq!(buffer, b"\"Hello, world!\"");
+/// assert_eq!(buf, b"[-3.1415926,\"Hello, world!\",false,[1,2,3],null]");
 /// ```
+#[diagnostic::on_unimplemented(note = "Consider using `<dyn Serializer>::new`")]
 pub trait Serializer {
-    /// Serializes a `bool` value.
-    fn serialize_bool_dyn(&mut self, v: bool) -> Result<(), Error>;
+    /// Serialize a `bool` value.
+    fn dyn_serialize_bool(&mut self, v: bool) -> InplaceSerializeResult<()>;
 
-    /// Serializes an `i8` value.
-    fn serialize_i8_dyn(&mut self, v: i8) -> Result<(), Error>;
+    /// Serialize an `i8` value.
+    fn dyn_serialize_i8(&mut self, v: i8) -> InplaceSerializeResult<()>;
 
-    /// Serializes an `i16` value.
-    fn serialize_i16_dyn(&mut self, v: i16) -> Result<(), Error>;
+    /// Serialize an `i16` value.
+    fn dyn_serialize_i16(&mut self, v: i16) -> InplaceSerializeResult<()>;
 
-    /// Serializes an `i32` value.
-    fn serialize_i32_dyn(&mut self, v: i32) -> Result<(), Error>;
+    /// Serialize an `i32` value.
+    fn dyn_serialize_i32(&mut self, v: i32) -> InplaceSerializeResult<()>;
 
-    /// Serializes an `i64` value.
-    fn serialize_i64_dyn(&mut self, v: i64) -> Result<(), Error>;
+    /// Serialize an `i64` value.
+    fn dyn_serialize_i64(&mut self, v: i64) -> InplaceSerializeResult<()>;
 
-    /// Serializes an `i128` value.
-    fn serialize_i128_dyn(&mut self, v: i128) -> Result<(), Error>;
+    /// Serialize an `i128` value.
+    fn dyn_serialize_i128(&mut self, v: i128) -> InplaceSerializeResult<()>;
 
-    /// Serializes a `u8` value.
-    fn serialize_u8_dyn(&mut self, v: u8) -> Result<(), Error>;
+    /// Serialize a `u8` value.
+    fn dyn_serialize_u8(&mut self, v: u8) -> InplaceSerializeResult<()>;
 
-    /// Serializes a `u16` value.
-    fn serialize_u16_dyn(&mut self, v: u16) -> Result<(), Error>;
+    /// Serialize a `u16` value.
+    fn dyn_serialize_u16(&mut self, v: u16) -> InplaceSerializeResult<()>;
 
-    /// Serializes a `u32` value.
-    fn serialize_u32_dyn(&mut self, v: u32) -> Result<(), Error>;
+    /// Serialize a `u32` value.
+    fn dyn_serialize_u32(&mut self, v: u32) -> InplaceSerializeResult<()>;
 
-    /// Serializes a `u64` value.
-    fn serialize_u64_dyn(&mut self, v: u64) -> Result<(), Error>;
+    /// Serialize a `u64` value.
+    fn dyn_serialize_u64(&mut self, v: u64) -> InplaceSerializeResult<()>;
 
-    /// Serializes a `u128` value.
-    fn serialize_u128_dyn(&mut self, v: u128) -> Result<(), Error>;
+    /// Serialize a `u128` value.
+    fn dyn_serialize_u128(&mut self, v: u128) -> InplaceSerializeResult<()>;
 
-    /// Serializes an `f32` value.
-    fn serialize_f32_dyn(&mut self, v: f32) -> Result<(), Error>;
+    /// Serialize an `f32` value.
+    fn dyn_serialize_f32(&mut self, v: f32) -> InplaceSerializeResult<()>;
 
-    /// Serializes an `f64` value.
-    fn serialize_f64_dyn(&mut self, v: f64) -> Result<(), Error>;
+    /// Serialize an `f64` value.
+    fn dyn_serialize_f64(&mut self, v: f64) -> InplaceSerializeResult<()>;
 
-    /// Serializes a character.
-    fn serialize_char_dyn(&mut self, v: char) -> Result<(), Error>;
+    /// Serialize a character.
+    fn dyn_serialize_char(&mut self, v: char) -> InplaceSerializeResult<()>;
 
-    /// Serializes a string slice.
-    fn serialize_str_dyn(&mut self, v: &str) -> Result<(), Error>;
+    /// Serialize a `&str`.
+    fn dyn_serialize_str(&mut self, v: &str) -> InplaceSerializeResult<()>;
 
-    /// Serializes a byte slice.
-    fn serialize_bytes_dyn(&mut self, v: &[u8]) -> Result<(), Error>;
+    /// Serialize a chunk of raw byte data.
+    fn dyn_serialize_bytes(&mut self, v: &[u8]) -> InplaceSerializeResult<()>;
 
-    /// Serializes an optional value that is absent.
-    fn serialize_none_dyn(&mut self) -> Result<(), Error>;
+    /// Serialize a `None` value.
+    fn dyn_serialize_none(&mut self) -> InplaceSerializeResult<()>;
 
-    /// Serializes an optional value that is present.
-    fn serialize_some_dyn(&mut self, value: &dyn Serialize) -> Result<(), Error>;
+    /// Serialize a `Some(_)` value.
+    fn dyn_serialize_some(&mut self, value: &dyn Serialize) -> InplaceSerializeResult<()>;
 
-    /// Serializes a unit value.
-    fn serialize_unit_dyn(&mut self) -> Result<(), Error>;
+    /// Serialize a `()` value.
+    fn dyn_serialize_unit(&mut self) -> InplaceSerializeResult<()>;
 
-    /// Serializes a unit struct.
-    fn serialize_unit_struct_dyn(&mut self, name: &'static str) -> Result<(), Error>;
+    /// Serialize a unit struct like `struct Unit` or `PhantomData<T>`.
+    fn dyn_serialize_unit_struct(&mut self, name: &'static str) -> InplaceSerializeResult<()>;
 
-    /// Serializes a unit variant.
-    fn serialize_unit_variant_dyn(
+    /// Serialize a unit variant like `E::A` in `enum E { A, B }`.
+    ///
+    /// The `name` is the name of the enum, the `variant_index` is the index of
+    /// this variant within the enum, and the `variant` is the name of the
+    /// variant.
+    fn dyn_serialize_unit_variant(
         &mut self,
         name: &'static str,
         variant_index: u32,
         variant: &'static str,
-    ) -> Result<(), Error>;
+    ) -> InplaceSerializeResult<()>;
 
-    /// Serializes a newtype struct.
-    fn serialize_newtype_struct_dyn(
+    /// Serialize a newtype struct like `struct Millimeters(u8)`.
+    fn dyn_serialize_newtype_struct(
         &mut self,
         name: &'static str,
         value: &dyn Serialize,
-    ) -> Result<(), Error>;
+    ) -> InplaceSerializeResult<()>;
 
-    /// Serializes a newtype variant.
-    fn serialize_newtype_variant_dyn(
+    /// Serialize a newtype variant like `E::N` in `enum E { N(u8) }`.
+    ///
+    /// The `name` is the name of the enum, the `variant_index` is the index of
+    /// this variant within the enum, and the `variant` is the name of the
+    /// variant. The `value` is the data contained within this newtype variant.
+    fn dyn_serialize_newtype_variant(
         &mut self,
         name: &'static str,
         variant_index: u32,
         variant: &'static str,
         value: &dyn Serialize,
-    ) -> Result<(), Error>;
+    ) -> InplaceSerializeResult<()>;
 
-    /// Begins to serialize a variably sized sequence.
-    fn serialize_seq_dyn(&mut self, len: Option<usize>) -> Result<(), Error>;
+    /// Begin to serialize a variably sized sequence. This call must be
+    /// followed by zero or more calls to `dyn_serialize_element`, then a call
+    /// to `dyn_end`.
+    ///
+    /// The argument is the number of elements in the sequence, which may or may
+    /// not be computable before the sequence is iterated. Some serializers only
+    /// support sequences whose length is known up front.
+    fn dyn_serialize_seq(
+        &mut self,
+        len: Option<usize>,
+    ) -> InplaceSerializeResult<&mut dyn SerializeSeq>;
 
-    /// Begins to serialize a statically sized sequence.
-    fn serialize_tuple_dyn(&mut self, len: usize) -> Result<(), Error>;
+    /// Begin to serialize a statically sized sequence whose length will be
+    /// known at deserialization time without looking at the serialized data.
+    /// This call must be followed by zero or more calls to
+    /// `dyn_serialize_element`, then a call to `dyn_end`.
+    fn dyn_serialize_tuple(
+        &mut self,
+        len: usize,
+    ) -> InplaceSerializeResult<&mut dyn SerializeTuple>;
 
-    /// Begins to serialize a tuple struct.
-    fn serialize_tuple_struct_dyn(&mut self, name: &'static str, len: usize) -> Result<(), Error>;
+    /// Begin to serialize a tuple struct like `struct Rgb(u8, u8, u8)`. This
+    /// call must be followed by zero or more calls to `dyn_serialize_field`,
+    /// then a call to `dyn_end`.
+    ///
+    /// The `name` is the name of the tuple struct and the `len` is the number
+    /// of data fields that will be serialized.
+    fn dyn_serialize_tuple_struct(
+        &mut self,
+        name: &'static str,
+        len: usize,
+    ) -> InplaceSerializeResult<&mut dyn SerializeTupleStruct>;
 
-    /// Begins to serialize a tuple variant.
-    fn serialize_tuple_variant_dyn(
+    /// Begin to serialize a tuple variant like `E::T` in `enum E { T(u8, u8)
+    /// }`. This call must be followed by zero or more calls to
+    /// `dyn_serialize_field`, then a call to `dyn_end`.
+    ///
+    /// The `name` is the name of the enum, the `variant_index` is the index of
+    /// this variant within the enum, the `variant` is the name of the variant,
+    /// and the `len` is the number of data fields that will be serialized.
+    fn dyn_serialize_tuple_variant(
         &mut self,
         name: &'static str,
         variant_index: u32,
         variant: &'static str,
         len: usize,
-    ) -> Result<(), Error>;
+    ) -> InplaceSerializeResult<&mut dyn SerializeTupleVariant>;
 
-    /// Begins to serialize a map.
-    fn serialize_map_dyn(&mut self, len: Option<usize>) -> Result<(), Error>;
+    /// Begin to serialize a map. This call must be followed by zero or more
+    /// calls to `dyn_serialize_key` and `dyn_serialize_value`, then a call to
+    /// `dyn_end`.
+    ///
+    /// The argument is the number of elements in the map, which may or may not
+    /// be computable before the map is iterated. Some serializers only support
+    /// maps whose length is known up front.
+    fn dyn_serialize_map(
+        &mut self,
+        len: Option<usize>,
+    ) -> InplaceSerializeResult<&mut dyn SerializeMap>;
 
-    /// Begins to serialize a struct.
-    fn serialize_struct_dyn(&mut self, name: &'static str, len: usize) -> Result<(), Error>;
+    /// Begin to serialize a struct like `struct Rgb { r: u8, g: u8, b: u8 }`.
+    /// This call must be followed by zero or more calls to
+    /// `dyn_serialize_field`, then a call to `dyn_end`.
+    ///
+    /// The `name` is the name of the struct and the `len` is the number of
+    /// data fields that will be serialized. `len` does not include fields
+    /// which are skipped with [`SerializeStruct::dyn_skip_field`].
+    fn dyn_serialize_struct(
+        &mut self,
+        name: &'static str,
+        len: usize,
+    ) -> InplaceSerializeResult<&mut dyn SerializeStruct>;
 
-    /// Begins to serialize a struct variant.
-    fn serialize_struct_variant_dyn(
+    /// Begin to serialize a struct variant like `E::S` in `enum E { S { r: u8,
+    /// g: u8, b: u8 } }`. This call must be followed by zero or more calls to
+    /// `dyn_serialize_field`, then a call to `dyn_end`.
+    ///
+    /// The `name` is the name of the enum, the `variant_index` is the index of
+    /// this variant within the enum, the `variant` is the name of the variant,
+    /// and the `len` is the number of data fields that will be serialized.
+    /// `len` does not include fields which are skipped with
+    /// [`SerializeStructVariant::dyn_skip_field`].
+    fn dyn_serialize_struct_variant(
         &mut self,
         name: &'static str,
         variant_index: u32,
         variant: &'static str,
         len: usize,
-    ) -> Result<(), Error>;
+    ) -> InplaceSerializeResult<&mut dyn SerializeStructVariant>;
 
-    /// Serializes a string produced by an implementation of `Display`.
-    fn collect_str_dyn(&mut self, value: &dyn Display) -> Result<(), Error>;
+    /// Serialize a string produced by an implementation of [`Display`].
+    fn dyn_collect_str(&mut self, value: &dyn Display) -> InplaceSerializeResult<()>;
 
     /// Determine whether `Serialize` implementations should serialize in
     /// human-readable form.
     ///
-    /// This method always returns `false` if the serializer is unusable.
+    /// See [`is_human_readable`] defined on the [`serde::Serializer`] trait
+    /// for more information.
     ///
-    /// See the documentation of [`serde::Serializer::is_human_readable`].
-    fn is_human_readable_dyn(&self) -> bool;
-
-    /// Serializes a sequence element.
-    fn seq_serialize_element_dyn(&mut self, value: &dyn Serialize) -> Result<(), Error>;
-
-    /// Finishes serializing a sequence.
-    fn seq_end_dyn(&mut self) -> Result<(), Error>;
-
-    /// Serializes a tuple element.
-    fn tuple_serialize_element_dyn(&mut self, value: &dyn Serialize) -> Result<(), Error>;
-
-    /// Finishes serializing a tuple.
-    fn tuple_end_dyn(&mut self) -> Result<(), Error>;
-
-    /// Serializes a tuple struct field.
-    fn tuple_struct_serialize_field_dyn(&mut self, value: &dyn Serialize) -> Result<(), Error>;
-
-    /// Finishes serializing a tuple struct.
-    fn tuple_struct_end_dyn(&mut self) -> Result<(), Error>;
-
-    /// Serializes a tuple variant field.
-    fn tuple_variant_serialize_field_dyn(&mut self, value: &dyn Serialize) -> Result<(), Error>;
-
-    /// Finishes serializing a tuple variant.
-    fn tuple_variant_end_dyn(&mut self) -> Result<(), Error>;
-
-    /// Serializes a map key.
-    fn map_serialize_key_dyn(&mut self, key: &dyn Serialize) -> Result<(), Error>;
-
-    /// Serializes a map value.
-    fn map_serialize_value_dyn(&mut self, value: &dyn Serialize) -> Result<(), Error>;
-
-    /// Serializes a map entry consisting of a key and a value.
-    fn map_serialize_entry_dyn(
-        &mut self,
-        k: &dyn Serialize,
-        v: &dyn Serialize,
-    ) -> Result<(), Error>;
-
-    /// Finishes serializing a map.
-    ///
-    /// This method will consume the dynamic serializer. And later, serializing
-    /// operations on this serializer will always return an error.
-    fn map_end_dyn(&mut self) -> Result<(), Error>;
-
-    /// Serializes a struct field.
-    fn struct_serialize_field_dyn(
-        &mut self,
-        key: &'static str,
-        value: &dyn Serialize,
-    ) -> Result<(), Error>;
-
-    /// Indicates that a struct field has been skipped.
-    fn struct_skip_field_dyn(&mut self, key: &'static str) -> Result<(), Error>;
-
-    /// Finishes serializing a struct.
-    fn struct_end_dyn(&mut self) -> Result<(), Error>;
-
-    /// Serializes a struct variant field.
-    fn struct_variant_serialize_field_dyn(
-        &mut self,
-        key: &'static str,
-        value: &dyn Serialize,
-    ) -> Result<(), Error>;
-
-    /// Indicates that a struct variant field has been skipped.
-    fn struct_variant_skip_field_dyn(&mut self, key: &'static str) -> Result<(), Error>;
-
-    /// Finishes serializing a struct variant.
-    fn struct_variant_end_dyn(&mut self) -> Result<(), Error>;
+    /// [`is_human_readable`]: ser::Serializer::is_human_readable
+    fn dyn_is_human_readable(&self) -> bool;
 }
 
-impl dyn Serializer {
-    /// Converts the concrete serializer into dynamic serializer.
+impl dyn Serializer + '_ {
+    /// A convenient way to construct an instance of [`dyn Serializer`].
     ///
-    /// # Example
+    /// This function is equivalent to [`InplaceSerializer::Serializer`].
+    ///
+    /// [`dyn Serializer`]: Serializer
+    ///
+    /// # Examples
     ///
     /// ```
-    /// use dyn_serde::Serializer;
-    ///
+    /// # use dyn_serde::Serializer;
+    /// #
     /// let stdout = std::io::stdout();
     /// let mut serializer = serde_json::Serializer::new(stdout.lock());
-    /// let serializer = <dyn Serializer>::new(&mut serializer);
+    /// let mut serializer = <dyn Serializer>::new(&mut serializer);
+    /// let serializer = &mut serializer as &mut dyn Serializer;
     /// # let _ = serializer;
     /// ```
-    #[inline]
     #[must_use]
-    pub fn new<S>(serializer: S) -> MakeSerializer<S>
-    where
-        S: serde::Serializer,
-    {
-        MakeSerializer::Serializer(serializer)
+    pub fn new<S: ser::Serializer>(serializer: S) -> InplaceSerializer<S> {
+        InplaceSerializer::Serializer(serializer)
     }
 }
 
-/// A serializer adaptor that performs in-place serialization.
+/// The dyn-compatible version of trait [`serde::ser::SerializeSeq`].
 ///
-/// This `enum` is the only implementation of the [`Serializer`] trait. To
-/// construct dynamic serializers, it's supposed to use method [`new`] defined
-/// on type `dyn Serializer`.
+/// The trait object is returned by [`dyn_serialize_seq`] defined on trait
+/// [`Serializer`].
 ///
-/// This serializer is implemented by a finite state machine:
+/// One should avoid implementing `SerializeSeq` manually and use
+/// [`InplaceSerializer::SerializeSeq`] to construct an instance instead.
 ///
-/// * At the beginning, this serializer is initialized to `Serializer`;
+/// [`dyn_serialize_seq`]: Serializer::dyn_serialize_seq
+pub trait SerializeSeq {
+    /// Serialize a sequence element.
+    fn dyn_serialize_element(&mut self, value: &dyn Serialize) -> InplaceSerializeResult<()>;
+
+    /// Finish serializing a sequence.
+    fn dyn_end(&mut self) -> InplaceSerializeResult<()>;
+}
+
+/// The dyn-compatible version of trait [`serde::ser::SerializeTuple`].
 ///
-/// * After serialization, this serializer is either `Value`;
+/// The trait object is returned by [`dyn_serialize_tuple`] defined on trait
+/// [`Serializer`].
 ///
-/// * And after the result has been taken, the serializer becomes `None`;
+/// One should avoid implementing `SerializeTuple` manually and use
+/// [`InplaceSerializer::SerializeTuple`] to construct an instance instead.
 ///
-/// [`new`]: trait.Serializer.html#method.new
-#[derive(Clone, Debug, Default)]
-pub enum MakeSerializer<S: ser::Serializer> {
-    /// The serialization result has been taken.
+/// [`dyn_serialize_tuple`]: Serializer::dyn_serialize_tuple
+pub trait SerializeTuple {
+    /// Serialize a tuple element.
+    fn dyn_serialize_element(&mut self, value: &dyn Serialize) -> InplaceSerializeResult<()>;
+
+    /// Finish serializing a tuple.
+    fn dyn_end(&mut self) -> InplaceSerializeResult<()>;
+}
+
+/// The dyn-compatible version of trait [`serde::ser::SerializeTupleStruct`].
+///
+/// The trait object is returned by [`dyn_serialize_tuple_struct`] defined on
+/// trait [`Serializer`].
+///
+/// One should avoid implementing `SerializeTupleStruct` manually and use
+/// [`InplaceSerializer::SerializeTupleStruct`] to construct an instance
+/// instead.
+///
+/// [`dyn_serialize_tuple_struct`]: Serializer::dyn_serialize_tuple_struct
+pub trait SerializeTupleStruct {
+    /// Serialize a tuple struct field.
+    fn dyn_serialize_field(&mut self, value: &dyn Serialize) -> InplaceSerializeResult<()>;
+
+    /// Finish serializing a tuple struct.
+    fn dyn_end(&mut self) -> InplaceSerializeResult<()>;
+}
+
+/// The dyn-compatible version of trait [`serde::ser::SerializeTupleVariant`].
+///
+/// The trait object is returned by [`dyn_serialize_tuple_variant`] defined on
+/// trait [`Serializer`].
+///
+/// One should avoid implementing `SerializeTupleVariant` manually and use
+/// [`InplaceSerializer::SerializeTupleVariant`] to construct an instance
+/// instead.
+///
+/// [`dyn_serialize_tuple_variant`]: Serializer::dyn_serialize_tuple_variant
+pub trait SerializeTupleVariant {
+    /// Serialize a tuple variant field.
+    fn dyn_serialize_field(&mut self, value: &dyn Serialize) -> InplaceSerializeResult<()>;
+
+    /// Finish serializing a tuple variant.
+    fn dyn_end(&mut self) -> InplaceSerializeResult<()>;
+}
+
+/// The dyn-compatible version of trait [`serde::ser::SerializeMap`].
+///
+/// The trait object is returned by [`dyn_serialize_map`] defined on trait
+/// [`Serializer`].
+///
+/// One should avoid implementing `SerializeMap` manually and use
+/// [`InplaceSerializer::SerializeMap`] to construct an instance instead.
+///
+/// [`dyn_serialize_map`]: Serializer::dyn_serialize_map
+pub trait SerializeMap {
+    /// Serialize a map key.
+    fn dyn_serialize_key(&mut self, key: &dyn Serialize) -> InplaceSerializeResult<()>;
+
+    /// Serialize a map value.
+    fn dyn_serialize_value(&mut self, value: &dyn Serialize) -> InplaceSerializeResult<()>;
+
+    /// Serialize a map entry consisting of a key and a value.
+    fn dyn_serialize_entry(
+        &mut self,
+        key: &dyn Serialize,
+        value: &dyn Serialize,
+    ) -> InplaceSerializeResult<()>;
+
+    /// Finish serializing a map.
+    fn dyn_end(&mut self) -> InplaceSerializeResult<()>;
+}
+
+/// The dyn-compatible version of trait [`serde::ser::SerializeStruct`].
+///
+/// The trait object is returned by [`dyn_serialize_struct`] defined on trait
+/// [`Serializer`].
+///
+/// One should avoid implementing `SerializeStruct` manually and use
+/// [`InplaceSerializer::SerializeStruct`] to construct an instance instead.
+///
+/// [`dyn_serialize_struct`]: Serializer::dyn_serialize_struct
+pub trait SerializeStruct {
+    /// Serialize a struct field.
+    fn dyn_serialize_field(
+        &mut self,
+        key: &'static str,
+        value: &dyn Serialize,
+    ) -> InplaceSerializeResult<()>;
+
+    /// Indicate that a struct field has been skipped.
+    fn dyn_skip_field(&mut self, key: &'static str) -> InplaceSerializeResult<()>;
+
+    /// Finish serializing a struct.
+    fn dyn_end(&mut self) -> InplaceSerializeResult<()>;
+}
+
+/// The dyn-compatible version of trait [`serde::ser::SerializeStructVariant`].
+///
+/// The trait object is returned by [`dyn_serialize_struct_variant`] defined on
+/// trait [`Serializer`].
+///
+/// One should avoid implementing `SerializeStructVariant` manually and use
+/// [`InplaceSerializer::SerializeStructVariant`] to construct an instance
+/// instead.
+///
+/// [`dyn_serialize_struct_variant`]: Serializer::dyn_serialize_struct_variant
+pub trait SerializeStructVariant {
+    /// Serialize a struct field.
+    fn dyn_serialize_field(
+        &mut self,
+        key: &'static str,
+        value: &dyn Serialize,
+    ) -> InplaceSerializeResult<()>;
+
+    /// Indicate that a struct variant field has been skipped.
+    fn dyn_skip_field(&mut self, key: &'static str) -> InplaceSerializeResult<()>;
+
+    /// Finish serializing a struct variant.
+    fn dyn_end(&mut self) -> InplaceSerializeResult<()>;
+}
+
+/// An implementation of the [`Serializer`] trait which performs in-place
+/// serialization so that the result type is unified to [`InplaceSerializeResult<_>`].
+///
+/// To construct an in-place serializer, use `<dyn Serializer>::new`.
+#[derive(Clone, Default, Debug)]
+pub enum InplaceSerializer<S: ser::Serializer> {
+    /// The serializer is not ready.
     #[default]
     None,
     /// The serialization has done successfully.
-    Value(S::Ok),
-    /// The serializer is ready to perform serialization.
+    Ok(S::Ok),
+    /// The serialization has done unsuccessfully.
+    Error(S::Error),
+    /// The serializer is ready.
     Serializer(S),
-    /// The serializer is serializing a sequence.
+    /// The serializer is ready to serialize the contents of a sequence.
     SerializeSeq(S::SerializeSeq),
-    /// The serializer is serializing a tuple.
+    /// The serializer is ready to serialize the contents of a tuple.
     SerializeTuple(S::SerializeTuple),
-    /// The serializer is serializing a tuple struct.
+    /// The serializer is ready to serialize the contents of a tuple struct.
     SerializeTupleStruct(S::SerializeTupleStruct),
-    /// The serializer is serializing a tuple variant.
+    /// The serializer is ready to serialize the contents of a tuple variant.
     SerializeTupleVariant(S::SerializeTupleVariant),
-    /// The serializer is serializing a map.
+    /// The serializer is ready to serialize the contents of a map.
     SerializeMap(S::SerializeMap),
-    /// The serializer is serializing a struct.
+    /// The serializer is ready to serialize the contents of a struct.
     SerializeStruct(S::SerializeStruct),
-    /// The serializer is serializing a struct variant.
+    /// The serializer is ready to serialize the contents of a struct variant.
     SerializeStructVariant(S::SerializeStructVariant),
 }
 
-impl<S: ser::Serializer> MakeSerializer<S> {
-    /// Consumes the serializer, returning the concrete serialization result.
-    ///
-    /// # Example
-    ///
-    /// ```
-    /// use dyn_serde::{Serialize, Serializer};
-    ///
-    /// let mut buffer = Vec::with_capacity(64);
-    /// let mut serializer = serde_json::Serializer::new(std::io::Cursor::new(&mut buffer));
-    /// let mut serializer = <dyn Serializer>::new(&mut serializer);
-    ///
-    /// let value = "Hello, world!";
-    /// value.serialize_dyn(&mut serializer).unwrap();
-    ///
-    /// // `serde_json::Serializer` returns `()`.
-    /// serializer.expect().unwrap();
-    /// assert_eq!(buffer, b"\"Hello, world!\"");
-    pub fn expect(self) -> Option<S::Ok> {
-        if let MakeSerializer::Value(value) = self {
-            Some(value)
+impl<S: ser::Serializer> InplaceSerializer<S> {
+    fn take(&mut self) -> InplaceSerializeResult<S> {
+        if let InplaceSerializer::Serializer(_) = self {
+            if let InplaceSerializer::Serializer(serializer) = mem::take(self) {
+                return Ok(serializer);
+            }
+        }
+        Err(InplaceSerializeError::NotSerializer)
+    }
+
+    fn take_seq(&mut self) -> InplaceSerializeResult<S::SerializeSeq> {
+        if let InplaceSerializer::SerializeSeq(_) = self {
+            if let InplaceSerializer::SerializeSeq(serializer) = mem::take(self) {
+                return Ok(serializer);
+            }
+        }
+        Err(InplaceSerializeError::NotSerializeSeq)
+    }
+
+    fn take_tuple(&mut self) -> InplaceSerializeResult<S::SerializeTuple> {
+        if let InplaceSerializer::SerializeTuple(_) = self {
+            if let InplaceSerializer::SerializeTuple(serializer) = mem::take(self) {
+                return Ok(serializer);
+            }
+        }
+        Err(InplaceSerializeError::NotSerializeTuple)
+    }
+
+    fn take_tuple_struct(&mut self) -> InplaceSerializeResult<S::SerializeTupleStruct> {
+        if let InplaceSerializer::SerializeTupleStruct(_) = self {
+            if let InplaceSerializer::SerializeTupleStruct(serializer) = mem::take(self) {
+                return Ok(serializer);
+            }
+        }
+        Err(InplaceSerializeError::NotSerializeTupleStruct)
+    }
+
+    fn take_tuple_variant(&mut self) -> InplaceSerializeResult<S::SerializeTupleVariant> {
+        if let InplaceSerializer::SerializeTupleVariant(_) = self {
+            if let InplaceSerializer::SerializeTupleVariant(serializer) = mem::take(self) {
+                return Ok(serializer);
+            }
+        }
+        Err(InplaceSerializeError::NotSerializeTupleVariant)
+    }
+
+    fn take_map(&mut self) -> InplaceSerializeResult<S::SerializeMap> {
+        if let InplaceSerializer::SerializeMap(_) = self {
+            if let InplaceSerializer::SerializeMap(serializer) = mem::take(self) {
+                return Ok(serializer);
+            }
+        }
+        Err(InplaceSerializeError::NotSerializeMap)
+    }
+
+    fn take_struct(&mut self) -> InplaceSerializeResult<S::SerializeStruct> {
+        if let InplaceSerializer::SerializeStruct(_) = self {
+            if let InplaceSerializer::SerializeStruct(serializer) = mem::take(self) {
+                return Ok(serializer);
+            }
+        }
+        Err(InplaceSerializeError::NotSerializeStruct)
+    }
+
+    fn take_struct_variant(&mut self) -> InplaceSerializeResult<S::SerializeStructVariant> {
+        if let InplaceSerializer::SerializeStructVariant(_) = self {
+            if let InplaceSerializer::SerializeStructVariant(serializer) = mem::take(self) {
+                return Ok(serializer);
+            }
+        }
+        Err(InplaceSerializeError::NotSerializeStructVariant)
+    }
+
+    fn get_seq(&mut self) -> InplaceSerializeResult<&mut S::SerializeSeq> {
+        if let InplaceSerializer::SerializeSeq(serializer) = self {
+            Ok(serializer)
         } else {
-            None
+            Err(InplaceSerializeError::NotSerializeSeq)
+        }
+    }
+
+    fn get_tuple(&mut self) -> InplaceSerializeResult<&mut S::SerializeTuple> {
+        if let InplaceSerializer::SerializeTuple(serializer) = self {
+            Ok(serializer)
+        } else {
+            Err(InplaceSerializeError::NotSerializeTuple)
+        }
+    }
+
+    fn get_tuple_struct(&mut self) -> InplaceSerializeResult<&mut S::SerializeTupleStruct> {
+        if let InplaceSerializer::SerializeTupleStruct(serializer) = self {
+            Ok(serializer)
+        } else {
+            Err(InplaceSerializeError::NotSerializeTupleStruct)
+        }
+    }
+
+    fn get_tuple_variant(&mut self) -> InplaceSerializeResult<&mut S::SerializeTupleVariant> {
+        if let InplaceSerializer::SerializeTupleVariant(serializer) = self {
+            Ok(serializer)
+        } else {
+            Err(InplaceSerializeError::NotSerializeTupleVariant)
+        }
+    }
+
+    fn get_map(&mut self) -> InplaceSerializeResult<&mut S::SerializeMap> {
+        if let InplaceSerializer::SerializeMap(serializer) = self {
+            Ok(serializer)
+        } else {
+            Err(InplaceSerializeError::NotSerializeMap)
+        }
+    }
+
+    fn get_struct(&mut self) -> InplaceSerializeResult<&mut S::SerializeStruct> {
+        if let InplaceSerializer::SerializeStruct(serializer) = self {
+            Ok(serializer)
+        } else {
+            Err(InplaceSerializeError::NotSerializeStruct)
+        }
+    }
+
+    fn get_struct_variant(&mut self) -> InplaceSerializeResult<&mut S::SerializeStructVariant> {
+        if let InplaceSerializer::SerializeStructVariant(serializer) = self {
+            Ok(serializer)
+        } else {
+            Err(InplaceSerializeError::NotSerializeStructVariant)
+        }
+    }
+
+    fn serialize_with<T, U, F, G, H>(&mut self, f: F, g: G, h: H) -> InplaceSerializeResult<()>
+    where
+        F: FnOnce(&mut Self) -> InplaceSerializeResult<T>,
+        G: FnOnce(U) -> Self,
+        H: FnOnce(T) -> Result<U, S::Error>,
+    {
+        match (h)((f)(self)?) {
+            #[allow(clippy::unit_arg)]
+            Ok(ok) => Ok(*self = (g)(ok)),
+            Err(error) => {
+                *self = InplaceSerializer::Error(error);
+                Err(InplaceSerializeError::Error)
+            }
+        }
+    }
+
+    fn serialize_with_mut<T, F, G>(&mut self, f: F, g: G) -> InplaceSerializeResult<()>
+    where
+        F: FnOnce(&mut Self) -> InplaceSerializeResult<&mut T>,
+        G: FnOnce(&mut T) -> Result<(), S::Error>,
+    {
+        match (g)((f)(self)?) {
+            Ok(ok) => Ok(ok),
+            Err(error) => {
+                *self = InplaceSerializer::Error(error);
+                Err(InplaceSerializeError::Error)
+            }
         }
     }
 }
 
-// /////////////////////////////////////////////////////////////////////////////
-// TRAIT IMPLEMENTATION
-// /////////////////////////////////////////////////////////////////////////////
+impl<S: ser::Serializer> Serializer for InplaceSerializer<S> {
+    fn dyn_serialize_bool(&mut self, v: bool) -> InplaceSerializeResult<()> {
+        self.serialize_with(InplaceSerializer::take, InplaceSerializer::Ok, |ser| {
+            ser.serialize_bool(v)
+        })
+    }
 
-impl<T: serde::Serialize> Serialize for T {
-    #[inline]
-    fn serialize_dyn(&self, serializer: &mut dyn Serializer) -> Result<(), Error> {
+    fn dyn_serialize_i8(&mut self, v: i8) -> InplaceSerializeResult<()> {
+        self.serialize_with(InplaceSerializer::take, InplaceSerializer::Ok, |ser| {
+            ser.serialize_i8(v)
+        })
+    }
+
+    fn dyn_serialize_i16(&mut self, v: i16) -> InplaceSerializeResult<()> {
+        self.serialize_with(InplaceSerializer::take, InplaceSerializer::Ok, |ser| {
+            ser.serialize_i16(v)
+        })
+    }
+
+    fn dyn_serialize_i32(&mut self, v: i32) -> InplaceSerializeResult<()> {
+        self.serialize_with(InplaceSerializer::take, InplaceSerializer::Ok, |ser| {
+            ser.serialize_i32(v)
+        })
+    }
+
+    fn dyn_serialize_i64(&mut self, v: i64) -> InplaceSerializeResult<()> {
+        self.serialize_with(InplaceSerializer::take, InplaceSerializer::Ok, |ser| {
+            ser.serialize_i64(v)
+        })
+    }
+
+    fn dyn_serialize_i128(&mut self, v: i128) -> InplaceSerializeResult<()> {
+        self.serialize_with(InplaceSerializer::take, InplaceSerializer::Ok, |ser| {
+            ser.serialize_i128(v)
+        })
+    }
+
+    fn dyn_serialize_u8(&mut self, v: u8) -> InplaceSerializeResult<()> {
+        self.serialize_with(InplaceSerializer::take, InplaceSerializer::Ok, |ser| {
+            ser.serialize_u8(v)
+        })
+    }
+
+    fn dyn_serialize_u16(&mut self, v: u16) -> InplaceSerializeResult<()> {
+        self.serialize_with(InplaceSerializer::take, InplaceSerializer::Ok, |ser| {
+            ser.serialize_u16(v)
+        })
+    }
+
+    fn dyn_serialize_u32(&mut self, v: u32) -> InplaceSerializeResult<()> {
+        self.serialize_with(InplaceSerializer::take, InplaceSerializer::Ok, |ser| {
+            ser.serialize_u32(v)
+        })
+    }
+
+    fn dyn_serialize_u64(&mut self, v: u64) -> InplaceSerializeResult<()> {
+        self.serialize_with(InplaceSerializer::take, InplaceSerializer::Ok, |ser| {
+            ser.serialize_u64(v)
+        })
+    }
+
+    fn dyn_serialize_u128(&mut self, v: u128) -> InplaceSerializeResult<()> {
+        self.serialize_with(InplaceSerializer::take, InplaceSerializer::Ok, |ser| {
+            ser.serialize_u128(v)
+        })
+    }
+
+    fn dyn_serialize_f32(&mut self, v: f32) -> InplaceSerializeResult<()> {
+        self.serialize_with(InplaceSerializer::take, InplaceSerializer::Ok, |ser| {
+            ser.serialize_f32(v)
+        })
+    }
+
+    fn dyn_serialize_f64(&mut self, v: f64) -> InplaceSerializeResult<()> {
+        self.serialize_with(InplaceSerializer::take, InplaceSerializer::Ok, |ser| {
+            ser.serialize_f64(v)
+        })
+    }
+
+    fn dyn_serialize_char(&mut self, v: char) -> InplaceSerializeResult<()> {
+        self.serialize_with(InplaceSerializer::take, InplaceSerializer::Ok, |ser| {
+            ser.serialize_char(v)
+        })
+    }
+
+    fn dyn_serialize_str(&mut self, v: &str) -> InplaceSerializeResult<()> {
+        self.serialize_with(InplaceSerializer::take, InplaceSerializer::Ok, |ser| {
+            ser.serialize_str(v)
+        })
+    }
+
+    fn dyn_serialize_bytes(&mut self, v: &[u8]) -> InplaceSerializeResult<()> {
+        self.serialize_with(InplaceSerializer::take, InplaceSerializer::Ok, |ser| {
+            ser.serialize_bytes(v)
+        })
+    }
+
+    fn dyn_serialize_none(&mut self) -> InplaceSerializeResult<()> {
+        self.serialize_with(InplaceSerializer::take, InplaceSerializer::Ok, |ser| {
+            ser.serialize_none()
+        })
+    }
+
+    fn dyn_serialize_some(&mut self, value: &dyn Serialize) -> InplaceSerializeResult<()> {
+        self.serialize_with(InplaceSerializer::take, InplaceSerializer::Ok, |ser| {
+            ser.serialize_some(value)
+        })
+    }
+
+    fn dyn_serialize_unit(&mut self) -> InplaceSerializeResult<()> {
+        self.serialize_with(InplaceSerializer::take, InplaceSerializer::Ok, |ser| {
+            ser.serialize_unit()
+        })
+    }
+
+    fn dyn_serialize_unit_struct(&mut self, name: &'static str) -> InplaceSerializeResult<()> {
+        self.serialize_with(InplaceSerializer::take, InplaceSerializer::Ok, |ser| {
+            ser.serialize_unit_struct(name)
+        })
+    }
+
+    fn dyn_serialize_unit_variant(
+        &mut self,
+        name: &'static str,
+        variant_index: u32,
+        variant: &'static str,
+    ) -> InplaceSerializeResult<()> {
+        self.serialize_with(InplaceSerializer::take, InplaceSerializer::Ok, |ser| {
+            ser.serialize_unit_variant(name, variant_index, variant)
+        })
+    }
+
+    fn dyn_serialize_newtype_struct(
+        &mut self,
+        name: &'static str,
+        value: &dyn Serialize,
+    ) -> InplaceSerializeResult<()> {
+        self.serialize_with(InplaceSerializer::take, InplaceSerializer::Ok, |ser| {
+            ser.serialize_newtype_struct(name, value)
+        })
+    }
+
+    fn dyn_serialize_newtype_variant(
+        &mut self,
+        name: &'static str,
+        variant_index: u32,
+        variant: &'static str,
+        value: &dyn Serialize,
+    ) -> InplaceSerializeResult<()> {
+        self.serialize_with(InplaceSerializer::take, InplaceSerializer::Ok, |ser| {
+            ser.serialize_newtype_variant(name, variant_index, variant, value)
+        })
+    }
+
+    fn dyn_serialize_seq(
+        &mut self,
+        len: Option<usize>,
+    ) -> InplaceSerializeResult<&mut dyn SerializeSeq> {
+        self.serialize_with(
+            InplaceSerializer::take,
+            InplaceSerializer::SerializeSeq,
+            |ser| ser.serialize_seq(len),
+        )?;
+        Ok(self)
+    }
+
+    fn dyn_serialize_tuple(
+        &mut self,
+        len: usize,
+    ) -> InplaceSerializeResult<&mut dyn SerializeTuple> {
+        self.serialize_with(
+            InplaceSerializer::take,
+            InplaceSerializer::SerializeTuple,
+            |ser| ser.serialize_tuple(len),
+        )?;
+        Ok(self)
+    }
+
+    fn dyn_serialize_tuple_struct(
+        &mut self,
+        name: &'static str,
+        len: usize,
+    ) -> InplaceSerializeResult<&mut dyn SerializeTupleStruct> {
+        self.serialize_with(
+            InplaceSerializer::take,
+            InplaceSerializer::SerializeTupleStruct,
+            |ser| ser.serialize_tuple_struct(name, len),
+        )?;
+        Ok(self)
+    }
+
+    fn dyn_serialize_tuple_variant(
+        &mut self,
+        name: &'static str,
+        variant_index: u32,
+        variant: &'static str,
+        len: usize,
+    ) -> InplaceSerializeResult<&mut dyn SerializeTupleVariant> {
+        self.serialize_with(
+            InplaceSerializer::take,
+            InplaceSerializer::SerializeTupleVariant,
+            |ser| ser.serialize_tuple_variant(name, variant_index, variant, len),
+        )?;
+        Ok(self)
+    }
+
+    fn dyn_serialize_map(
+        &mut self,
+        len: Option<usize>,
+    ) -> InplaceSerializeResult<&mut dyn SerializeMap> {
+        self.serialize_with(
+            InplaceSerializer::take,
+            InplaceSerializer::SerializeMap,
+            |ser| ser.serialize_map(len),
+        )?;
+        Ok(self)
+    }
+
+    fn dyn_serialize_struct(
+        &mut self,
+        name: &'static str,
+        len: usize,
+    ) -> InplaceSerializeResult<&mut dyn SerializeStruct> {
+        self.serialize_with(
+            InplaceSerializer::take,
+            InplaceSerializer::SerializeStruct,
+            |ser| ser.serialize_struct(name, len),
+        )?;
+        Ok(self)
+    }
+
+    fn dyn_serialize_struct_variant(
+        &mut self,
+        name: &'static str,
+        variant_index: u32,
+        variant: &'static str,
+        len: usize,
+    ) -> InplaceSerializeResult<&mut dyn SerializeStructVariant> {
+        self.serialize_with(
+            InplaceSerializer::take,
+            InplaceSerializer::SerializeStructVariant,
+            |ser| ser.serialize_struct_variant(name, variant_index, variant, len),
+        )?;
+        Ok(self)
+    }
+
+    fn dyn_collect_str(&mut self, value: &dyn Display) -> InplaceSerializeResult<()> {
+        self.serialize_with(InplaceSerializer::take, InplaceSerializer::Ok, |ser| {
+            ser.collect_str(value)
+        })
+    }
+
+    fn dyn_is_human_readable(&self) -> bool {
+        if let InplaceSerializer::Serializer(serializer) = self {
+            serializer.is_human_readable()
+        } else {
+            true
+        }
+    }
+}
+
+impl<S: ser::Serializer> SerializeSeq for InplaceSerializer<S> {
+    fn dyn_serialize_element(&mut self, value: &dyn Serialize) -> InplaceSerializeResult<()> {
+        self.serialize_with_mut(InplaceSerializer::get_seq, |ser| {
+            ser.serialize_element(value)
+        })
+    }
+
+    fn dyn_end(&mut self) -> InplaceSerializeResult<()> {
+        self.serialize_with(
+            InplaceSerializer::take_seq,
+            InplaceSerializer::Ok,
+            S::SerializeSeq::end,
+        )
+    }
+}
+
+impl<S: ser::Serializer> SerializeTuple for InplaceSerializer<S> {
+    fn dyn_serialize_element(&mut self, value: &dyn Serialize) -> InplaceSerializeResult<()> {
+        self.serialize_with_mut(InplaceSerializer::get_tuple, |ser| {
+            ser.serialize_element(value)
+        })
+    }
+
+    fn dyn_end(&mut self) -> InplaceSerializeResult<()> {
+        self.serialize_with(
+            InplaceSerializer::take_tuple,
+            InplaceSerializer::Ok,
+            S::SerializeTuple::end,
+        )
+    }
+}
+
+impl<S: ser::Serializer> SerializeTupleStruct for InplaceSerializer<S> {
+    fn dyn_serialize_field(&mut self, value: &dyn Serialize) -> InplaceSerializeResult<()> {
+        self.serialize_with_mut(InplaceSerializer::get_tuple_struct, |ser| {
+            ser.serialize_field(value)
+        })
+    }
+
+    fn dyn_end(&mut self) -> InplaceSerializeResult<()> {
+        self.serialize_with(
+            InplaceSerializer::take_tuple_struct,
+            InplaceSerializer::Ok,
+            S::SerializeTupleStruct::end,
+        )
+    }
+}
+
+impl<S: ser::Serializer> SerializeTupleVariant for InplaceSerializer<S> {
+    fn dyn_serialize_field(&mut self, value: &dyn Serialize) -> InplaceSerializeResult<()> {
+        self.serialize_with_mut(InplaceSerializer::get_tuple_variant, |ser| {
+            ser.serialize_field(value)
+        })
+    }
+
+    fn dyn_end(&mut self) -> InplaceSerializeResult<()> {
+        self.serialize_with(
+            InplaceSerializer::take_tuple_variant,
+            InplaceSerializer::Ok,
+            S::SerializeTupleVariant::end,
+        )
+    }
+}
+
+impl<S: ser::Serializer> SerializeMap for InplaceSerializer<S> {
+    fn dyn_serialize_key(&mut self, key: &dyn Serialize) -> InplaceSerializeResult<()> {
+        self.serialize_with_mut(InplaceSerializer::get_map, |ser| ser.serialize_key(key))
+    }
+
+    fn dyn_serialize_value(&mut self, value: &dyn Serialize) -> InplaceSerializeResult<()> {
+        self.serialize_with_mut(InplaceSerializer::get_map, |ser| ser.serialize_value(value))
+    }
+
+    fn dyn_serialize_entry(
+        &mut self,
+        key: &dyn Serialize,
+        value: &dyn Serialize,
+    ) -> InplaceSerializeResult<()> {
+        self.serialize_with_mut(InplaceSerializer::get_map, |ser| {
+            ser.serialize_entry(key, value)
+        })
+    }
+
+    fn dyn_end(&mut self) -> InplaceSerializeResult<()> {
+        self.serialize_with(
+            InplaceSerializer::take_map,
+            InplaceSerializer::Ok,
+            S::SerializeMap::end,
+        )
+    }
+}
+
+impl<S: ser::Serializer> SerializeStruct for InplaceSerializer<S> {
+    fn dyn_serialize_field(
+        &mut self,
+        key: &'static str,
+        value: &dyn Serialize,
+    ) -> InplaceSerializeResult<()> {
+        self.serialize_with_mut(InplaceSerializer::get_struct, |ser| {
+            ser.serialize_field(key, value)
+        })
+    }
+
+    fn dyn_skip_field(&mut self, key: &'static str) -> InplaceSerializeResult<()> {
+        self.serialize_with_mut(InplaceSerializer::get_struct, |ser| ser.skip_field(key))
+    }
+
+    fn dyn_end(&mut self) -> InplaceSerializeResult<()> {
+        self.serialize_with(
+            InplaceSerializer::take_struct,
+            InplaceSerializer::Ok,
+            S::SerializeStruct::end,
+        )
+    }
+}
+
+impl<S: ser::Serializer> SerializeStructVariant for InplaceSerializer<S> {
+    fn dyn_serialize_field(
+        &mut self,
+        key: &'static str,
+        value: &dyn Serialize,
+    ) -> InplaceSerializeResult<()> {
+        self.serialize_with_mut(InplaceSerializer::get_struct_variant, |ser| {
+            ser.serialize_field(key, value)
+        })
+    }
+
+    fn dyn_skip_field(&mut self, key: &'static str) -> InplaceSerializeResult<()> {
+        self.serialize_with_mut(InplaceSerializer::get_struct_variant, |ser| {
+            ser.skip_field(key)
+        })
+    }
+
+    fn dyn_end(&mut self) -> InplaceSerializeResult<()> {
+        self.serialize_with(
+            InplaceSerializer::take_struct_variant,
+            InplaceSerializer::Ok,
+            S::SerializeStructVariant::end,
+        )
+    }
+}
+
+/// An error returned by [`InplaceSerializer`] when the in-place serialization
+/// has done unsuccessfully.
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InplaceSerializeError {
+    /// The serialization has done successfully.
+    Ok,
+    /// The serialization has done unsuccessfully.
+    Error,
+    /// The serializer is not ready.
+    NotSerializer,
+    /// The serializer is not ready to serialize the contents of a sequence.
+    NotSerializeSeq,
+    /// The serializer is not ready to serialize the contents of a tuple.
+    NotSerializeTuple,
+    /// The serializer is not ready to serialize the contents of a tuple struct.
+    NotSerializeTupleStruct,
+    /// The serializer is not ready to serialize the contents of a tuple variant.
+    NotSerializeTupleVariant,
+    /// The serializer is not ready to serialize the contents of a map.
+    NotSerializeMap,
+    /// The serializer is not ready to serialize the contents of a struct.
+    NotSerializeStruct,
+    /// The serializer is not ready to serialize the contents of a struct variant.
+    NotSerializeStructVariant,
+}
+
+impl Display for InplaceSerializeError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            InplaceSerializeError::Ok => "the serialization has done successfully",
+            InplaceSerializeError::Error => "the serialization has done unsuccessfully",
+            InplaceSerializeError::NotSerializer => "the serializer is not ready",
+            InplaceSerializeError::NotSerializeSeq => {
+                "the serializer is not ready to serialize the contents of a sequence"
+            }
+            InplaceSerializeError::NotSerializeTuple => {
+                "the serializer is not ready to serialize the contents of a tuple"
+            }
+            InplaceSerializeError::NotSerializeTupleStruct => {
+                "the serializer is not ready to serialize the contents of a tuple struct"
+            }
+            InplaceSerializeError::NotSerializeTupleVariant => {
+                "the serializer is not ready to serialize the contents of a tuple variant"
+            }
+            InplaceSerializeError::NotSerializeMap => {
+                "the serializer is not ready to serialize the contents of a map"
+            }
+            InplaceSerializeError::NotSerializeStruct => {
+                "the serializer is not ready to serialize the contents of a struct"
+            }
+            InplaceSerializeError::NotSerializeStructVariant => {
+                "the serializer is not ready to serialize the contents of a struct variant"
+            }
+        })
+    }
+}
+
+impl Error for InplaceSerializeError {}
+
+/// An error returned by [`dyn Serializer`] when the dynamic serialization has
+/// done unsuccessfully.
+///
+/// [`dyn Serializer`]: Serializer
+#[repr(transparent)]
+pub struct SerializeError(Box<SerializeErrorData>);
+
+// TODO: !!!OPTIMIZE ME!!!
+enum SerializeErrorData {
+    Either(InplaceSerializeError),
+    Or(String),
+}
+
+impl Debug for SerializeError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("SerializeError")
+            .field(match self.0.as_ref() {
+                SerializeErrorData::Either(error) => error,
+                SerializeErrorData::Or(error) => error,
+            })
+            .finish()
+    }
+}
+
+impl Display for SerializeError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        match self.0.as_ref() {
+            SerializeErrorData::Either(error) => Display::fmt(error, f),
+            SerializeErrorData::Or(error) => f.write_str(error),
+        }
+    }
+}
+
+impl Error for SerializeError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self.0.as_ref() {
+            SerializeErrorData::Either(error) => Some(error),
+            SerializeErrorData::Or(_) => None,
+        }
+    }
+}
+
+impl SerError for SerializeError {
+    #[cold]
+    #[inline(never)]
+    fn custom<T: Display>(msg: T) -> Self {
+        SerializeError(Box::new(SerializeErrorData::Or(msg.to_string())))
+    }
+}
+
+impl From<InplaceSerializeError> for SerializeError {
+    #[cold]
+    #[inline(never)]
+    fn from(value: InplaceSerializeError) -> Self {
+        SerializeError(Box::new(SerializeErrorData::Either(value)))
+    }
+}
+
+// TRAIT IMPLEMENTATION
+// ----------------------------------------------------------------------------
+impl<T: ser::Serialize> Serialize for T {
+    fn dyn_serialize(&self, serializer: &mut dyn Serializer) -> SerializeResult<()> {
         self.serialize(serializer)
     }
 }
 
-#[allow(clippy::unit_arg)]
-impl<S: serde::Serializer> Serializer for MakeSerializer<S> {
-    fn serialize_bool_dyn(&mut self, v: bool) -> Result<(), Error> {
-        if let MakeSerializer::Serializer(ser) = mem::take(self) {
-            match ser.serialize_bool(v) {
-                Ok(ok) => Ok(*self = MakeSerializer::Value(ok)),
-                Err(err) => Err(ser::Error::custom(err)),
-            }
-        } else {
-            Err(Error::default())
-        }
-    }
-
-    fn serialize_i8_dyn(&mut self, v: i8) -> Result<(), Error> {
-        if let MakeSerializer::Serializer(ser) = mem::take(self) {
-            match ser.serialize_i8(v) {
-                Ok(ok) => Ok(*self = MakeSerializer::Value(ok)),
-                Err(err) => Err(ser::Error::custom(err)),
-            }
-        } else {
-            Err(Error::default())
-        }
-    }
-
-    fn serialize_i16_dyn(&mut self, v: i16) -> Result<(), Error> {
-        if let MakeSerializer::Serializer(ser) = mem::take(self) {
-            match ser.serialize_i16(v) {
-                Ok(ok) => Ok(*self = MakeSerializer::Value(ok)),
-                Err(err) => Err(ser::Error::custom(err)),
-            }
-        } else {
-            Err(Error::default())
-        }
-    }
-
-    fn serialize_i32_dyn(&mut self, v: i32) -> Result<(), Error> {
-        if let MakeSerializer::Serializer(ser) = mem::take(self) {
-            match ser.serialize_i32(v) {
-                Ok(ok) => Ok(*self = MakeSerializer::Value(ok)),
-                Err(err) => Err(ser::Error::custom(err)),
-            }
-        } else {
-            Err(Error::default())
-        }
-    }
-
-    fn serialize_i64_dyn(&mut self, v: i64) -> Result<(), Error> {
-        if let MakeSerializer::Serializer(ser) = mem::take(self) {
-            match ser.serialize_i64(v) {
-                Ok(ok) => Ok(*self = MakeSerializer::Value(ok)),
-                Err(err) => Err(ser::Error::custom(err)),
-            }
-        } else {
-            Err(Error::default())
-        }
-    }
-
-    fn serialize_i128_dyn(&mut self, v: i128) -> Result<(), Error> {
-        if let MakeSerializer::Serializer(ser) = mem::take(self) {
-            match ser.serialize_i128(v) {
-                Ok(ok) => Ok(*self = MakeSerializer::Value(ok)),
-                Err(err) => Err(ser::Error::custom(err)),
-            }
-        } else {
-            Err(Error::default())
-        }
-    }
-
-    fn serialize_u8_dyn(&mut self, v: u8) -> Result<(), Error> {
-        if let MakeSerializer::Serializer(ser) = mem::take(self) {
-            match ser.serialize_u8(v) {
-                Ok(ok) => Ok(*self = MakeSerializer::Value(ok)),
-                Err(err) => Err(ser::Error::custom(err)),
-            }
-        } else {
-            Err(Error::default())
-        }
-    }
-
-    fn serialize_u16_dyn(&mut self, v: u16) -> Result<(), Error> {
-        if let MakeSerializer::Serializer(ser) = mem::take(self) {
-            match ser.serialize_u16(v) {
-                Ok(ok) => Ok(*self = MakeSerializer::Value(ok)),
-                Err(err) => Err(ser::Error::custom(err)),
-            }
-        } else {
-            Err(Error::default())
-        }
-    }
-
-    fn serialize_u32_dyn(&mut self, v: u32) -> Result<(), Error> {
-        if let MakeSerializer::Serializer(ser) = mem::take(self) {
-            match ser.serialize_u32(v) {
-                Ok(ok) => Ok(*self = MakeSerializer::Value(ok)),
-                Err(err) => Err(ser::Error::custom(err)),
-            }
-        } else {
-            Err(Error::default())
-        }
-    }
-
-    fn serialize_u64_dyn(&mut self, v: u64) -> Result<(), Error> {
-        if let MakeSerializer::Serializer(ser) = mem::take(self) {
-            match ser.serialize_u64(v) {
-                Ok(ok) => Ok(*self = MakeSerializer::Value(ok)),
-                Err(err) => Err(ser::Error::custom(err)),
-            }
-        } else {
-            Err(Error::default())
-        }
-    }
-
-    fn serialize_u128_dyn(&mut self, v: u128) -> Result<(), Error> {
-        if let MakeSerializer::Serializer(ser) = mem::take(self) {
-            match ser.serialize_u128(v) {
-                Ok(ok) => Ok(*self = MakeSerializer::Value(ok)),
-                Err(err) => Err(ser::Error::custom(err)),
-            }
-        } else {
-            Err(Error::default())
-        }
-    }
-
-    fn serialize_f32_dyn(&mut self, v: f32) -> Result<(), Error> {
-        if let MakeSerializer::Serializer(ser) = mem::take(self) {
-            match ser.serialize_f32(v) {
-                Ok(ok) => Ok(*self = MakeSerializer::Value(ok)),
-                Err(err) => Err(ser::Error::custom(err)),
-            }
-        } else {
-            Err(Error::default())
-        }
-    }
-
-    fn serialize_f64_dyn(&mut self, v: f64) -> Result<(), Error> {
-        if let MakeSerializer::Serializer(ser) = mem::take(self) {
-            match ser.serialize_f64(v) {
-                Ok(ok) => Ok(*self = MakeSerializer::Value(ok)),
-                Err(err) => Err(ser::Error::custom(err)),
-            }
-        } else {
-            Err(Error::default())
-        }
-    }
-
-    fn serialize_char_dyn(&mut self, v: char) -> Result<(), Error> {
-        if let MakeSerializer::Serializer(ser) = mem::take(self) {
-            match ser.serialize_char(v) {
-                Ok(ok) => Ok(*self = MakeSerializer::Value(ok)),
-                Err(err) => Err(ser::Error::custom(err)),
-            }
-        } else {
-            Err(Error::default())
-        }
-    }
-
-    fn serialize_str_dyn(&mut self, v: &str) -> Result<(), Error> {
-        if let MakeSerializer::Serializer(ser) = mem::take(self) {
-            match ser.serialize_str(v) {
-                Ok(ok) => Ok(*self = MakeSerializer::Value(ok)),
-                Err(err) => Err(ser::Error::custom(err)),
-            }
-        } else {
-            Err(Error::default())
-        }
-    }
-
-    fn serialize_bytes_dyn(&mut self, v: &[u8]) -> Result<(), Error> {
-        if let MakeSerializer::Serializer(ser) = mem::take(self) {
-            match ser.serialize_bytes(v) {
-                Ok(ok) => Ok(*self = MakeSerializer::Value(ok)),
-                Err(err) => Err(ser::Error::custom(err)),
-            }
-        } else {
-            Err(Error::default())
-        }
-    }
-
-    fn serialize_none_dyn(&mut self) -> Result<(), Error> {
-        if let MakeSerializer::Serializer(ser) = mem::take(self) {
-            match ser.serialize_none() {
-                Ok(ok) => Ok(*self = MakeSerializer::Value(ok)),
-                Err(err) => Err(ser::Error::custom(err)),
-            }
-        } else {
-            Err(Error::default())
-        }
-    }
-
-    fn serialize_some_dyn(&mut self, value: &dyn Serialize) -> Result<(), Error> {
-        if let MakeSerializer::Serializer(ser) = mem::take(self) {
-            match ser.serialize_some(value) {
-                Ok(ok) => Ok(*self = MakeSerializer::Value(ok)),
-                Err(err) => Err(ser::Error::custom(err)),
-            }
-        } else {
-            Err(Error::default())
-        }
-    }
-
-    fn serialize_unit_dyn(&mut self) -> Result<(), Error> {
-        if let MakeSerializer::Serializer(ser) = mem::take(self) {
-            match ser.serialize_unit() {
-                Ok(ok) => Ok(*self = MakeSerializer::Value(ok)),
-                Err(err) => Err(ser::Error::custom(err)),
-            }
-        } else {
-            Err(Error::default())
-        }
-    }
-
-    fn serialize_unit_struct_dyn(&mut self, name: &'static str) -> Result<(), Error> {
-        if let MakeSerializer::Serializer(ser) = mem::take(self) {
-            match ser.serialize_unit_struct(name) {
-                Ok(ok) => Ok(*self = MakeSerializer::Value(ok)),
-                Err(err) => Err(ser::Error::custom(err)),
-            }
-        } else {
-            Err(Error::default())
-        }
-    }
-
-    fn serialize_unit_variant_dyn(
-        &mut self,
-        name: &'static str,
-        variant_index: u32,
-        variant: &'static str,
-    ) -> Result<(), Error> {
-        if let MakeSerializer::Serializer(ser) = mem::take(self) {
-            match ser.serialize_unit_variant(name, variant_index, variant) {
-                Ok(ok) => Ok(*self = MakeSerializer::Value(ok)),
-                Err(err) => Err(ser::Error::custom(err)),
-            }
-        } else {
-            Err(Error::default())
-        }
-    }
-
-    fn serialize_newtype_struct_dyn(
-        &mut self,
-        name: &'static str,
-        value: &dyn Serialize,
-    ) -> Result<(), Error> {
-        if let MakeSerializer::Serializer(ser) = mem::take(self) {
-            match ser.serialize_newtype_struct(name, value) {
-                Ok(ok) => Ok(*self = MakeSerializer::Value(ok)),
-                Err(err) => Err(ser::Error::custom(err)),
-            }
-        } else {
-            Err(Error::default())
-        }
-    }
-
-    fn serialize_newtype_variant_dyn(
-        &mut self,
-        name: &'static str,
-        variant_index: u32,
-        variant: &'static str,
-        value: &dyn Serialize,
-    ) -> Result<(), Error> {
-        if let MakeSerializer::Serializer(ser) = mem::take(self) {
-            match ser.serialize_newtype_variant(name, variant_index, variant, value) {
-                Ok(ok) => Ok(*self = MakeSerializer::Value(ok)),
-                Err(err) => Err(ser::Error::custom(err)),
-            }
-        } else {
-            Err(Error::default())
-        }
-    }
-
-    fn serialize_seq_dyn(&mut self, len: Option<usize>) -> Result<(), Error> {
-        if let MakeSerializer::Serializer(ser) = mem::take(self) {
-            match ser.serialize_seq(len) {
-                Ok(ok) => Ok(*self = MakeSerializer::SerializeSeq(ok)),
-                Err(err) => Err(ser::Error::custom(err)),
-            }
-        } else {
-            Err(Error::default())
-        }
-    }
-
-    fn serialize_tuple_dyn(&mut self, len: usize) -> Result<(), Error> {
-        if let MakeSerializer::Serializer(ser) = mem::take(self) {
-            match ser.serialize_tuple(len) {
-                Ok(ok) => Ok(*self = MakeSerializer::SerializeTuple(ok)),
-                Err(err) => Err(ser::Error::custom(err)),
-            }
-        } else {
-            Err(Error::default())
-        }
-    }
-
-    fn serialize_tuple_struct_dyn(&mut self, name: &'static str, len: usize) -> Result<(), Error> {
-        if let MakeSerializer::Serializer(ser) = mem::take(self) {
-            match ser.serialize_tuple_struct(name, len) {
-                Ok(ok) => Ok(*self = MakeSerializer::SerializeTupleStruct(ok)),
-                Err(err) => Err(ser::Error::custom(err)),
-            }
-        } else {
-            Err(Error::default())
-        }
-    }
-
-    fn serialize_tuple_variant_dyn(
-        &mut self,
-        name: &'static str,
-        variant_index: u32,
-        variant: &'static str,
-        len: usize,
-    ) -> Result<(), Error> {
-        if let MakeSerializer::Serializer(ser) = mem::take(self) {
-            match ser.serialize_tuple_variant(name, variant_index, variant, len) {
-                Ok(ok) => Ok(*self = MakeSerializer::SerializeTupleVariant(ok)),
-                Err(err) => Err(ser::Error::custom(err)),
-            }
-        } else {
-            Err(Error::default())
-        }
-    }
-
-    fn serialize_map_dyn(&mut self, len: Option<usize>) -> Result<(), Error> {
-        if let MakeSerializer::Serializer(ser) = mem::take(self) {
-            match ser.serialize_map(len) {
-                Ok(ok) => Ok(*self = MakeSerializer::SerializeMap(ok)),
-                Err(err) => Err(ser::Error::custom(err)),
-            }
-        } else {
-            Err(Error::default())
-        }
-    }
-
-    fn serialize_struct_dyn(&mut self, name: &'static str, len: usize) -> Result<(), Error> {
-        if let MakeSerializer::Serializer(ser) = mem::take(self) {
-            match ser.serialize_struct(name, len) {
-                Ok(ok) => Ok(*self = MakeSerializer::SerializeStruct(ok)),
-                Err(err) => Err(ser::Error::custom(err)),
-            }
-        } else {
-            Err(Error::default())
-        }
-    }
-
-    fn serialize_struct_variant_dyn(
-        &mut self,
-        name: &'static str,
-        variant_index: u32,
-        variant: &'static str,
-        len: usize,
-    ) -> Result<(), Error> {
-        if let MakeSerializer::Serializer(ser) = mem::take(self) {
-            match ser.serialize_struct_variant(name, variant_index, variant, len) {
-                Ok(ok) => Ok(*self = MakeSerializer::SerializeStructVariant(ok)),
-                Err(err) => Err(ser::Error::custom(err)),
-            }
-        } else {
-            Err(Error::default())
-        }
-    }
-
-    fn collect_str_dyn(&mut self, value: &dyn Display) -> Result<(), Error> {
-        if let MakeSerializer::Serializer(ser) = mem::take(self) {
-            match ser.collect_str(value) {
-                Ok(ok) => Ok(*self = MakeSerializer::Value(ok)),
-                Err(err) => Err(ser::Error::custom(err)),
-            }
-        } else {
-            Err(Error::default())
-        }
-    }
-
-    fn is_human_readable_dyn(&self) -> bool {
-        matches!(self, MakeSerializer::Serializer(ser) if ser.is_human_readable())
-    }
-
-    fn seq_serialize_element_dyn(&mut self, value: &dyn Serialize) -> Result<(), Error> {
-        if let MakeSerializer::SerializeSeq(ser) = self {
-            ser::SerializeSeq::serialize_element(ser, value).map_err(ser::Error::custom)
-        } else {
-            Err(Error::default())
-        }
-    }
-
-    fn seq_end_dyn(&mut self) -> Result<(), Error> {
-        if let MakeSerializer::SerializeSeq(ser) = mem::take(self) {
-            match ser::SerializeSeq::end(ser) {
-                Ok(ok) => Ok(*self = MakeSerializer::Value(ok)),
-                Err(err) => Err(ser::Error::custom(err)),
-            }
-        } else {
-            Err(Error::default())
-        }
-    }
-
-    fn tuple_serialize_element_dyn(&mut self, value: &dyn Serialize) -> Result<(), Error> {
-        if let MakeSerializer::SerializeTuple(ser) = self {
-            ser::SerializeTuple::serialize_element(ser, value).map_err(ser::Error::custom)
-        } else {
-            Err(Error::default())
-        }
-    }
-
-    fn tuple_end_dyn(&mut self) -> Result<(), Error> {
-        if let MakeSerializer::SerializeTuple(ser) = mem::take(self) {
-            match ser::SerializeTuple::end(ser) {
-                Ok(ok) => Ok(*self = MakeSerializer::Value(ok)),
-                Err(err) => Err(ser::Error::custom(err)),
-            }
-        } else {
-            Err(Error::default())
-        }
-    }
-
-    fn tuple_struct_serialize_field_dyn(&mut self, value: &dyn Serialize) -> Result<(), Error> {
-        if let MakeSerializer::SerializeTupleStruct(ser) = self {
-            ser::SerializeTupleStruct::serialize_field(ser, value).map_err(ser::Error::custom)
-        } else {
-            Err(Error::default())
-        }
-    }
-
-    fn tuple_struct_end_dyn(&mut self) -> Result<(), Error> {
-        if let MakeSerializer::SerializeTupleStruct(ser) = mem::take(self) {
-            match ser::SerializeTupleStruct::end(ser) {
-                Ok(ok) => Ok(*self = MakeSerializer::Value(ok)),
-                Err(err) => Err(ser::Error::custom(err)),
-            }
-        } else {
-            Err(Error::default())
-        }
-    }
-
-    fn tuple_variant_serialize_field_dyn(&mut self, value: &dyn Serialize) -> Result<(), Error> {
-        if let MakeSerializer::SerializeTupleVariant(ser) = self {
-            ser::SerializeTupleVariant::serialize_field(ser, value).map_err(ser::Error::custom)
-        } else {
-            Err(Error::default())
-        }
-    }
-
-    fn tuple_variant_end_dyn(&mut self) -> Result<(), Error> {
-        if let MakeSerializer::SerializeTupleVariant(ser) = mem::take(self) {
-            match ser::SerializeTupleVariant::end(ser) {
-                Ok(ok) => Ok(*self = MakeSerializer::Value(ok)),
-                Err(err) => Err(ser::Error::custom(err)),
-            }
-        } else {
-            Err(Error::default())
-        }
-    }
-
-    fn map_serialize_key_dyn(&mut self, key: &dyn Serialize) -> Result<(), Error> {
-        if let MakeSerializer::SerializeMap(ser) = self {
-            ser::SerializeMap::serialize_key(ser, key).map_err(ser::Error::custom)
-        } else {
-            Err(Error::default())
-        }
-    }
-
-    fn map_serialize_value_dyn(&mut self, value: &dyn Serialize) -> Result<(), Error> {
-        if let MakeSerializer::SerializeMap(ser) = self {
-            ser::SerializeMap::serialize_value(ser, value).map_err(ser::Error::custom)
-        } else {
-            Err(Error::default())
-        }
-    }
-
-    fn map_serialize_entry_dyn(
-        &mut self,
-        key: &dyn Serialize,
-        value: &dyn Serialize,
-    ) -> Result<(), Error> {
-        if let MakeSerializer::SerializeMap(ser) = self {
-            ser::SerializeMap::serialize_entry(ser, key, value).map_err(ser::Error::custom)
-        } else {
-            Err(Error::default())
-        }
-    }
-
-    fn map_end_dyn(&mut self) -> Result<(), Error> {
-        if let MakeSerializer::SerializeMap(ser) = mem::take(self) {
-            match ser::SerializeMap::end(ser) {
-                Ok(ok) => Ok(*self = MakeSerializer::Value(ok)),
-                Err(err) => Err(ser::Error::custom(err)),
-            }
-        } else {
-            Err(Error::default())
-        }
-    }
-
-    fn struct_serialize_field_dyn(
-        &mut self,
-        key: &'static str,
-        value: &dyn Serialize,
-    ) -> Result<(), Error> {
-        if let MakeSerializer::SerializeStruct(ser) = self {
-            ser::SerializeStruct::serialize_field(ser, key, value).map_err(ser::Error::custom)
-        } else {
-            Err(Error::default())
-        }
-    }
-
-    fn struct_skip_field_dyn(&mut self, key: &'static str) -> Result<(), Error> {
-        if let MakeSerializer::SerializeStruct(ser) = self {
-            ser::SerializeStruct::skip_field(ser, key).map_err(ser::Error::custom)
-        } else {
-            Err(Error::default())
-        }
-    }
-
-    fn struct_end_dyn(&mut self) -> Result<(), Error> {
-        if let MakeSerializer::SerializeStruct(ser) = mem::take(self) {
-            match ser::SerializeStruct::end(ser) {
-                Ok(ok) => Ok(*self = MakeSerializer::Value(ok)),
-                Err(err) => Err(ser::Error::custom(err)),
-            }
-        } else {
-            Err(Error::default())
-        }
-    }
-
-    fn struct_variant_serialize_field_dyn(
-        &mut self,
-        key: &'static str,
-        value: &dyn Serialize,
-    ) -> Result<(), Error> {
-        if let MakeSerializer::SerializeStructVariant(ser) = self {
-            ser::SerializeStructVariant::serialize_field(ser, key, value)
-                .map_err(ser::Error::custom)
-        } else {
-            Err(Error::default())
-        }
-    }
-
-    fn struct_variant_skip_field_dyn(&mut self, key: &'static str) -> Result<(), Error> {
-        if let MakeSerializer::SerializeStructVariant(ser) = self {
-            ser::SerializeStructVariant::skip_field(ser, key).map_err(ser::Error::custom)
-        } else {
-            Err(Error::default())
-        }
-    }
-
-    fn struct_variant_end_dyn(&mut self) -> Result<(), Error> {
-        if let MakeSerializer::SerializeStructVariant(ser) = mem::take(self) {
-            match ser::SerializeStructVariant::end(ser) {
-                Ok(ok) => Ok(*self = MakeSerializer::Value(ok)),
-                Err(err) => Err(ser::Error::custom(err)),
-            }
-        } else {
-            Err(Error::default())
+impl ser::Serialize for dyn Serialize + '_ {
+    fn serialize<S: ser::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let mut serializer = InplaceSerializer::Serializer(serializer);
+        let result = self.dyn_serialize(&mut serializer);
+        match serializer {
+            InplaceSerializer::Ok(ok) => Ok(ok),
+            InplaceSerializer::Error(error) => Err(error),
+            // This never panics becasue `result` is `Ok(_)` if and only if
+            // the `serializer` is `Ok(_)`.
+            _ => Err(ser::Error::custom(result.unwrap_err())),
         }
     }
 }
 
-// /////////////////////////////////////////////////////////////////////////////
-// TRAIT OBJECT IMPLEMENTATION
-// /////////////////////////////////////////////////////////////////////////////
-
-impl serde::Serialize for dyn Serialize + '_ {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        let mut serializer = <dyn Serializer>::new(serializer);
-        match self.serialize_dyn(&mut serializer) {
-            Ok(()) => match serializer.expect() {
-                Some(ok) => Ok(ok),
-                None => Err(ser::Error::custom(Error::default())),
-            },
-            Err(err) => Err(err.into_ser_error()),
-        }
-    }
-}
-
-impl serde::Serializer for &mut dyn Serializer {
+impl<'a> ser::Serializer for &'a mut (dyn Serializer + '_) {
     type Ok = ();
-    type Error = Error;
-    type SerializeSeq = Self;
-    type SerializeTuple = Self;
-    type SerializeTupleStruct = Self;
-    type SerializeTupleVariant = Self;
-    type SerializeMap = Self;
-    type SerializeStruct = Self;
-    type SerializeStructVariant = Self;
+    type Error = SerializeError;
+    type SerializeSeq = &'a mut dyn SerializeSeq;
+    type SerializeTuple = &'a mut dyn SerializeTuple;
+    type SerializeTupleStruct = &'a mut dyn SerializeTupleStruct;
+    type SerializeTupleVariant = &'a mut dyn SerializeTupleVariant;
+    type SerializeMap = &'a mut dyn SerializeMap;
+    type SerializeStruct = &'a mut dyn SerializeStruct;
+    type SerializeStructVariant = &'a mut dyn SerializeStructVariant;
 
-    #[inline]
-    fn serialize_bool(self, v: bool) -> Result<(), Error> {
-        self.serialize_bool_dyn(v)
+    fn serialize_bool(self, v: bool) -> SerializeResult<()> {
+        self.dyn_serialize_bool(v).map_err(SerializeError::from)
     }
 
-    #[inline]
-    fn serialize_i8(self, v: i8) -> Result<(), Error> {
-        self.serialize_i8_dyn(v)
+    fn serialize_i8(self, v: i8) -> SerializeResult<()> {
+        self.dyn_serialize_i8(v).map_err(SerializeError::from)
     }
 
-    #[inline]
-    fn serialize_i16(self, v: i16) -> Result<(), Error> {
-        self.serialize_i16_dyn(v)
+    fn serialize_i16(self, v: i16) -> SerializeResult<()> {
+        self.dyn_serialize_i16(v).map_err(SerializeError::from)
     }
 
-    #[inline]
-    fn serialize_i32(self, v: i32) -> Result<(), Error> {
-        self.serialize_i32_dyn(v)
+    fn serialize_i32(self, v: i32) -> SerializeResult<()> {
+        self.dyn_serialize_i32(v).map_err(SerializeError::from)
     }
 
-    #[inline]
-    fn serialize_i64(self, v: i64) -> Result<(), Error> {
-        self.serialize_i64_dyn(v)
+    fn serialize_i64(self, v: i64) -> SerializeResult<()> {
+        self.dyn_serialize_i64(v).map_err(SerializeError::from)
     }
 
-    #[inline]
-    fn serialize_i128(self, v: i128) -> Result<(), Error> {
-        self.serialize_i128_dyn(v)
+    fn serialize_u8(self, v: u8) -> SerializeResult<()> {
+        self.dyn_serialize_u8(v).map_err(SerializeError::from)
     }
 
-    #[inline]
-    fn serialize_u8(self, v: u8) -> Result<(), Error> {
-        self.serialize_u8_dyn(v)
+    fn serialize_u16(self, v: u16) -> SerializeResult<()> {
+        self.dyn_serialize_u16(v).map_err(SerializeError::from)
     }
 
-    #[inline]
-    fn serialize_u16(self, v: u16) -> Result<(), Error> {
-        self.serialize_u16_dyn(v)
+    fn serialize_u32(self, v: u32) -> SerializeResult<()> {
+        self.dyn_serialize_u32(v).map_err(SerializeError::from)
     }
 
-    #[inline]
-    fn serialize_u32(self, v: u32) -> Result<(), Error> {
-        self.serialize_u32_dyn(v)
+    fn serialize_u64(self, v: u64) -> SerializeResult<()> {
+        self.dyn_serialize_u64(v).map_err(SerializeError::from)
     }
 
-    #[inline]
-    fn serialize_u64(self, v: u64) -> Result<(), Error> {
-        self.serialize_u64_dyn(v)
+    fn serialize_f32(self, v: f32) -> SerializeResult<()> {
+        self.dyn_serialize_f32(v).map_err(SerializeError::from)
     }
 
-    #[inline]
-    fn serialize_u128(self, v: u128) -> Result<(), Error> {
-        self.serialize_u128_dyn(v)
+    fn serialize_f64(self, v: f64) -> SerializeResult<()> {
+        self.dyn_serialize_f64(v).map_err(SerializeError::from)
     }
 
-    #[inline]
-    fn serialize_f32(self, v: f32) -> Result<(), Error> {
-        self.serialize_f32_dyn(v)
+    fn serialize_char(self, v: char) -> SerializeResult<()> {
+        self.dyn_serialize_char(v).map_err(SerializeError::from)
     }
 
-    #[inline]
-    fn serialize_f64(self, v: f64) -> Result<(), Error> {
-        self.serialize_f64_dyn(v)
+    fn serialize_str(self, v: &str) -> SerializeResult<()> {
+        self.dyn_serialize_str(v).map_err(SerializeError::from)
     }
 
-    #[inline]
-    fn serialize_char(self, v: char) -> Result<(), Error> {
-        self.serialize_char_dyn(v)
+    fn serialize_bytes(self, v: &[u8]) -> SerializeResult<()> {
+        self.dyn_serialize_bytes(v).map_err(SerializeError::from)
     }
 
-    #[inline]
-    fn serialize_str(self, v: &str) -> Result<(), Error> {
-        self.serialize_str_dyn(v)
+    fn serialize_none(self) -> SerializeResult<()> {
+        self.dyn_serialize_none().map_err(SerializeError::from)
     }
 
-    #[inline]
-    fn serialize_bytes(self, v: &[u8]) -> Result<(), Error> {
-        self.serialize_bytes_dyn(v)
-    }
-
-    #[inline]
-    fn serialize_none(self) -> Result<(), Error> {
-        self.serialize_none_dyn()
-    }
-
-    #[inline]
-    fn serialize_some<T>(self, value: &T) -> Result<(), Error>
+    fn serialize_some<T>(self, value: &T) -> SerializeResult<()>
     where
-        T: ?Sized + serde::Serialize,
+        T: ?Sized + ser::Serialize,
     {
-        self.serialize_some_dyn(&value)
+        self.dyn_serialize_some(&value)
+            .map_err(SerializeError::from)
     }
 
-    #[inline]
-    fn serialize_unit(self) -> Result<(), Error> {
-        self.serialize_unit_dyn()
+    fn serialize_unit(self) -> SerializeResult<()> {
+        self.dyn_serialize_unit().map_err(SerializeError::from)
     }
 
-    #[inline]
-    fn serialize_unit_struct(self, name: &'static str) -> Result<(), Error> {
-        self.serialize_unit_struct_dyn(name)
+    fn serialize_unit_struct(self, name: &'static str) -> SerializeResult<()> {
+        self.dyn_serialize_unit_struct(name)
+            .map_err(SerializeError::from)
     }
 
-    #[inline]
     fn serialize_unit_variant(
         self,
         name: &'static str,
         variant_index: u32,
         variant: &'static str,
-    ) -> Result<(), Error> {
-        self.serialize_unit_variant_dyn(name, variant_index, variant)
+    ) -> SerializeResult<()> {
+        self.dyn_serialize_unit_variant(name, variant_index, variant)
+            .map_err(SerializeError::from)
     }
 
-    #[inline]
-    fn serialize_newtype_struct<T>(self, name: &'static str, value: &T) -> Result<(), Error>
+    fn serialize_newtype_struct<T>(self, name: &'static str, value: &T) -> SerializeResult<()>
     where
-        T: ?Sized + serde::Serialize,
+        T: ?Sized + ser::Serialize,
     {
-        self.serialize_newtype_struct_dyn(name, &value)
+        self.dyn_serialize_newtype_struct(name, &value)
+            .map_err(SerializeError::from)
     }
 
-    #[inline]
     fn serialize_newtype_variant<T>(
         self,
         name: &'static str,
         variant_index: u32,
         variant: &'static str,
         value: &T,
-    ) -> Result<(), Error>
+    ) -> SerializeResult<()>
     where
-        T: ?Sized + serde::Serialize,
+        T: ?Sized + ser::Serialize,
     {
-        self.serialize_newtype_variant_dyn(name, variant_index, variant, &value)
+        self.dyn_serialize_newtype_variant(name, variant_index, variant, &value)
+            .map_err(SerializeError::from)
     }
 
-    #[inline]
-    fn serialize_seq(self, len: Option<usize>) -> Result<Self, Error> {
-        self.serialize_seq_dyn(len)?;
-        Ok(self)
+    fn serialize_seq(self, len: Option<usize>) -> SerializeResult<Self::SerializeSeq> {
+        self.dyn_serialize_seq(len).map_err(SerializeError::from)
     }
 
-    #[inline]
-    fn serialize_tuple(self, len: usize) -> Result<Self, Error> {
-        self.serialize_tuple_dyn(len)?;
-        Ok(self)
+    fn serialize_tuple(self, len: usize) -> SerializeResult<Self::SerializeTuple> {
+        self.dyn_serialize_tuple(len).map_err(SerializeError::from)
     }
 
-    #[inline]
-    fn serialize_tuple_struct(self, name: &'static str, len: usize) -> Result<Self, Error> {
-        self.serialize_tuple_struct_dyn(name, len)?;
-        Ok(self)
+    fn serialize_tuple_struct(
+        self,
+        name: &'static str,
+        len: usize,
+    ) -> SerializeResult<Self::SerializeTupleStruct> {
+        self.dyn_serialize_tuple_struct(name, len)
+            .map_err(SerializeError::from)
     }
 
-    #[inline]
     fn serialize_tuple_variant(
         self,
         name: &'static str,
         variant_index: u32,
         variant: &'static str,
         len: usize,
-    ) -> Result<Self, Error> {
-        self.serialize_tuple_variant_dyn(name, variant_index, variant, len)?;
-        Ok(self)
+    ) -> SerializeResult<Self::SerializeTupleVariant> {
+        self.dyn_serialize_tuple_variant(name, variant_index, variant, len)
+            .map_err(SerializeError::from)
     }
 
-    #[inline]
-    fn serialize_map(self, len: Option<usize>) -> Result<Self, Error> {
-        self.serialize_map_dyn(len)?;
-        Ok(self)
+    fn serialize_map(self, len: Option<usize>) -> SerializeResult<Self::SerializeMap> {
+        self.dyn_serialize_map(len).map_err(SerializeError::from)
     }
 
-    #[inline]
-    fn serialize_struct(self, name: &'static str, len: usize) -> Result<Self, Error> {
-        self.serialize_struct_dyn(name, len)?;
-        Ok(self)
+    fn serialize_struct(
+        self,
+        name: &'static str,
+        len: usize,
+    ) -> SerializeResult<Self::SerializeStruct> {
+        self.dyn_serialize_struct(name, len)
+            .map_err(SerializeError::from)
     }
 
-    #[inline]
     fn serialize_struct_variant(
         self,
         name: &'static str,
         variant_index: u32,
         variant: &'static str,
         len: usize,
-    ) -> Result<Self, Error> {
-        self.serialize_struct_variant_dyn(name, variant_index, variant, len)?;
-        Ok(self)
-    }
-
-    #[inline]
-    fn collect_str<T>(self, value: &T) -> Result<(), Error>
-    where
-        T: ?Sized + Display,
-    {
-        self.collect_str_dyn(&value)
-    }
-
-    #[inline]
-    fn is_human_readable(&self) -> bool {
-        self.is_human_readable_dyn()
+    ) -> SerializeResult<Self::SerializeStructVariant> {
+        self.dyn_serialize_struct_variant(name, variant_index, variant, len)
+            .map_err(SerializeError::from)
     }
 }
 
-impl ser::SerializeSeq for &mut dyn Serializer {
+impl ser::SerializeSeq for &mut (dyn SerializeSeq + '_) {
     type Ok = ();
-    type Error = Error;
+    type Error = SerializeError;
 
-    #[inline]
-    fn serialize_element<T>(&mut self, value: &T) -> Result<(), Error>
+    fn serialize_element<T>(&mut self, value: &T) -> SerializeResult<()>
     where
-        T: ?Sized + serde::Serialize,
+        T: ?Sized + ser::Serialize,
     {
-        self.seq_serialize_element_dyn(&value)
+        self.dyn_serialize_element(&value)
+            .map_err(SerializeError::from)
     }
 
-    #[inline]
-    fn end(self) -> Result<(), Error> {
-        self.seq_end_dyn()
+    fn end(self) -> SerializeResult<()> {
+        self.dyn_end().map_err(SerializeError::from)
     }
 }
 
-impl ser::SerializeTuple for &mut dyn Serializer {
+impl ser::SerializeTuple for &mut (dyn SerializeTuple + '_) {
     type Ok = ();
-    type Error = Error;
+    type Error = SerializeError;
 
-    #[inline]
-    fn serialize_element<T>(&mut self, value: &T) -> Result<(), Error>
+    fn serialize_element<T>(&mut self, value: &T) -> SerializeResult<()>
     where
-        T: ?Sized + serde::Serialize,
+        T: ?Sized + ser::Serialize,
     {
-        self.tuple_serialize_element_dyn(&value)
+        self.dyn_serialize_element(&value)
+            .map_err(SerializeError::from)
     }
 
-    #[inline]
-    fn end(self) -> Result<(), Error> {
-        self.tuple_end_dyn()
+    fn end(self) -> SerializeResult<()> {
+        self.dyn_end().map_err(SerializeError::from)
     }
 }
 
-impl ser::SerializeTupleStruct for &mut dyn Serializer {
+impl ser::SerializeTupleStruct for &mut (dyn SerializeTupleStruct + '_) {
     type Ok = ();
-    type Error = Error;
+    type Error = SerializeError;
 
-    #[inline]
-    fn serialize_field<T>(&mut self, value: &T) -> Result<(), Error>
+    fn serialize_field<T>(&mut self, value: &T) -> SerializeResult<()>
     where
-        T: ?Sized + serde::Serialize,
+        T: ?Sized + ser::Serialize,
     {
-        self.tuple_struct_serialize_field_dyn(&value)
+        self.dyn_serialize_field(&value)
+            .map_err(SerializeError::from)
     }
 
-    #[inline]
-    fn end(self) -> Result<(), Error> {
-        self.tuple_struct_end_dyn()
+    fn end(self) -> SerializeResult<()> {
+        self.dyn_end().map_err(SerializeError::from)
     }
 }
 
-impl ser::SerializeTupleVariant for &mut dyn Serializer {
+impl ser::SerializeTupleVariant for &mut (dyn SerializeTupleVariant + '_) {
     type Ok = ();
-    type Error = Error;
+    type Error = SerializeError;
 
-    #[inline]
-    fn serialize_field<T>(&mut self, value: &T) -> Result<(), Error>
+    fn serialize_field<T>(&mut self, value: &T) -> SerializeResult<()>
     where
-        T: ?Sized + serde::Serialize,
+        T: ?Sized + ser::Serialize,
     {
-        self.tuple_variant_serialize_field_dyn(&value)
+        self.dyn_serialize_field(&value)
+            .map_err(SerializeError::from)
     }
 
-    #[inline]
-    fn end(self) -> Result<(), Error> {
-        self.tuple_variant_end_dyn()
+    fn end(self) -> SerializeResult<()> {
+        self.dyn_end().map_err(SerializeError::from)
     }
 }
 
-impl ser::SerializeMap for &mut dyn Serializer {
+impl ser::SerializeMap for &mut (dyn SerializeMap + '_) {
     type Ok = ();
-    type Error = Error;
+    type Error = SerializeError;
 
-    #[inline]
-    fn serialize_key<T>(&mut self, key: &T) -> Result<(), Error>
+    fn serialize_key<T>(&mut self, key: &T) -> SerializeResult<()>
     where
-        T: ?Sized + serde::Serialize,
+        T: ?Sized + ser::Serialize,
     {
-        self.map_serialize_key_dyn(&key)
+        self.dyn_serialize_key(&key).map_err(SerializeError::from)
     }
 
-    #[inline]
-    fn serialize_value<T>(&mut self, value: &T) -> Result<(), Error>
+    fn serialize_value<T>(&mut self, value: &T) -> SerializeResult<()>
     where
-        T: ?Sized + serde::Serialize,
+        T: ?Sized + ser::Serialize,
     {
-        self.map_serialize_value_dyn(&value)
+        self.dyn_serialize_value(&value)
+            .map_err(SerializeError::from)
     }
 
-    #[inline]
-    fn serialize_entry<K, V>(&mut self, key: &K, value: &V) -> Result<(), Error>
+    fn serialize_entry<K, V>(&mut self, key: &K, value: &V) -> SerializeResult<()>
     where
-        K: ?Sized + serde::Serialize,
-        V: ?Sized + serde::Serialize,
+        K: ?Sized + ser::Serialize,
+        V: ?Sized + ser::Serialize,
     {
-        self.map_serialize_entry_dyn(&key, &value)
+        self.dyn_serialize_entry(&key, &value)
+            .map_err(SerializeError::from)
     }
 
-    #[inline]
-    fn end(self) -> Result<(), Error> {
-        self.map_end_dyn()
+    fn end(self) -> SerializeResult<()> {
+        self.dyn_end().map_err(SerializeError::from)
     }
 }
 
-impl ser::SerializeStruct for &mut dyn Serializer {
+impl ser::SerializeStruct for &mut (dyn SerializeStruct + '_) {
     type Ok = ();
-    type Error = Error;
+    type Error = SerializeError;
 
-    #[inline]
-    fn serialize_field<T>(&mut self, key: &'static str, value: &T) -> Result<(), Error>
+    fn serialize_field<T>(&mut self, key: &'static str, value: &T) -> SerializeResult<()>
     where
-        T: ?Sized + serde::Serialize,
+        T: ?Sized + ser::Serialize,
     {
-        self.struct_serialize_field_dyn(key, &value)
+        self.dyn_serialize_field(key, &value)
+            .map_err(SerializeError::from)
     }
 
-    #[inline]
-    fn skip_field(&mut self, key: &'static str) -> Result<(), Error> {
-        self.struct_skip_field_dyn(key)
+    fn skip_field(&mut self, key: &'static str) -> SerializeResult<()> {
+        self.dyn_skip_field(key).map_err(SerializeError::from)
     }
 
-    #[inline]
-    fn end(self) -> Result<(), Error> {
-        self.struct_end_dyn()
+    fn end(self) -> SerializeResult<()> {
+        self.dyn_end().map_err(SerializeError::from)
     }
 }
 
-impl ser::SerializeStructVariant for &mut dyn Serializer {
+impl ser::SerializeStructVariant for &mut (dyn SerializeStructVariant + '_) {
     type Ok = ();
-    type Error = Error;
+    type Error = SerializeError;
 
-    #[inline]
-    fn serialize_field<T>(&mut self, key: &'static str, value: &T) -> Result<(), Error>
+    fn serialize_field<T>(&mut self, key: &'static str, value: &T) -> SerializeResult<()>
     where
-        T: ?Sized + serde::Serialize,
+        T: ?Sized + ser::Serialize,
     {
-        self.struct_variant_serialize_field_dyn(key, &value)
+        self.dyn_serialize_field(key, &value)
+            .map_err(SerializeError::from)
     }
 
-    #[inline]
-    fn skip_field(&mut self, key: &'static str) -> Result<(), Error> {
-        self.struct_variant_skip_field_dyn(key)
+    fn skip_field(&mut self, key: &'static str) -> SerializeResult<()> {
+        self.dyn_skip_field(key).map_err(SerializeError::from)
     }
 
-    #[inline]
-    fn end(self) -> Result<(), Error> {
-        self.struct_variant_end_dyn()
+    fn end(self) -> SerializeResult<()> {
+        self.dyn_end().map_err(SerializeError::from)
     }
 }
