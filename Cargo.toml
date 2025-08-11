@@ -1,8 +1,8 @@
 [package]
 name = "dyn_serde"
-version = "1.1.1"
-authors = ["Huang Yifan"]
-edition = "2021"
+version = "1.1.2"
+authors = ["Huang Yifan <yifan0610@foxmail.com>"]
+edition = "2024"
 description = "dynamic serialization and deserialization based on serde"
 readme = "README.md"
 homepage = "https://crates.io/crates/dyn_serde"
