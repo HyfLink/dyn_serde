@@ -1,6 +1,6 @@
 [package]
 name = "dyn_serde"
-version = "1.1.0"
+version = "1.1.1"
 authors = ["Huang Yifan"]
 edition = "2021"
 description = "dynamic serialization and deserialization based on serde"

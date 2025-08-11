@@ -11,8 +11,6 @@ use alloc::string::{String, ToString};
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 
-use serde::de;
-use serde::de::Error as DeError;
 use serde::de::VariantAccess as _;
 
 /// The result type returned by [`dyn Deserializer`]'s methods.
@@ -25,20 +23,21 @@ pub type InplaceDeserializeResult<T> = Result<T, InplaceDeserializeError>;
 
 /// The dyn-compatible version of [`serde::Deserializer`].
 ///
-/// TODO: documentation
+/// One should avoid implementing `Deserializer` manually and use
+/// `<dyn Deserializer>::new` to construct an instance instead.
 ///
 /// # Example
 ///
 /// ```
-/// use serde::Deserialize;
-/// use dyn_serde::Deserializer;
+/// # use serde::Deserialize as _;
+/// # use dyn_serde::Deserializer;
+/// #
+/// let mut deserializer = serde_json::Deserializer::from_str("\"Hello, world!\"");
+/// let mut deserializer = <dyn Deserializer<'_>>::new(&mut deserializer);
+/// let deserializer = &mut deserializer as &mut dyn Deserializer<'_>;
 ///
-/// let mut deserializer = serde_json::Deserializer::from_str("false");
-/// let mut deserializer = <dyn Deserializer>::new(&mut deserializer);
-/// let deserializer: &mut dyn Deserializer = &mut deserializer;
-///
-/// let value = bool::deserialize(deserializer).unwrap();
-/// assert_eq!(value, false);
+/// let value = String::deserialize(deserializer).unwrap();
+/// assert_eq!(value, "Hello, world!");
 /// ```
 #[diagnostic::on_unimplemented(note = "Consider using `<dyn Deserializer>::new`")]
 pub trait Deserializer<'de> {
@@ -269,8 +268,8 @@ impl<'de> dyn Deserializer<'de> + '_ {
     /// # Examples
     ///
     /// ```
-    /// use dyn_serde::Deserializer;
-    ///
+    /// # use dyn_serde::Deserializer;
+    /// #
     /// let mut deserializer = serde_json::Deserializer::from_str("false");
     /// let mut deserializer = <dyn Deserializer>::new(&mut deserializer);
     /// let deserializer = &mut deserializer as &mut dyn Deserializer<'_>;
@@ -279,13 +278,13 @@ impl<'de> dyn Deserializer<'de> + '_ {
     #[must_use]
     pub fn new<D>(deserializer: D) -> InplaceDeserializer<'de, D>
     where
-        D: de::Deserializer<'de>,
+        D: serde::Deserializer<'de>,
     {
         InplaceDeserializer::Deserializer(deserializer)
     }
 }
 
-/// The dyn-compatible version of trait [`de::DeserializeSeed`].
+/// The dyn-compatible version of trait [`serde::de::DeserializeSeed`].
 ///
 /// One should avoid implementing `Visitor` manually and use
 /// [`InplaceDeserializeSeed::DeserializeSeed`] to construct an instance instead.
@@ -302,7 +301,7 @@ pub trait DeserializeSeed<'de> {
     ) -> DeserializeResult<()>;
 }
 
-/// The dyn-compatible version of trait [`de::Visitor`].
+/// The dyn-compatible version of trait [`serde::de::Visitor`].
 ///
 /// One should avoid implementing `Visitor` manually and use
 /// [`InplaceVisitor::Visitor`] to construct an instance instead.
@@ -402,7 +401,7 @@ pub trait Visitor<'de> {
     fn dyn_visit_enum(&mut self, access: &mut dyn EnumAccess<'de>) -> DeserializeResult<()>;
 }
 
-/// The dyn-compatible version of trait [`de::SeqAccess`].
+/// The dyn-compatible version of trait [`serde::de::SeqAccess`].
 ///
 /// The trait object is created by the [`Deserializer`] and passed to the
 /// [`Visitor`] in order to deserialize the content of the sequence.
@@ -421,7 +420,7 @@ pub trait SeqAccess<'de> {
     fn dyn_size_hint(&self) -> Option<usize>;
 }
 
-/// The dyn-compatible version of trait [`de::MapAccess`].
+/// The dyn-compatible version of trait [`serde::de::MapAccess`].
 ///
 /// The trait object is created by the [`Deserializer`] and passed to the
 /// [`Visitor`] in order to deserialize the content of the map.
@@ -454,7 +453,7 @@ pub trait MapAccess<'de> {
     fn dyn_size_hint(&self) -> Option<usize>;
 }
 
-/// The dyn-compatible version of trait [`de::EnumAccess`].
+/// The dyn-compatible version of trait [`serde::de::EnumAccess`].
 ///
 /// The trait object is created by the [`Deserializer`] and passed to the
 /// [`Visitor`] in order to identify which variant of an enum to deserialize.
@@ -469,7 +468,7 @@ pub trait EnumAccess<'de> {
     ) -> InplaceDeserializeResult<&mut dyn VariantAccess<'de>>;
 }
 
-/// The dyn-compatible version of trait [`de::VariantAccess`].
+/// The dyn-compatible version of trait [`serde::de::VariantAccess`].
 ///
 /// The trait object is returned by [`dyn_variant`] defined on trait
 /// [`EnumAccess`].
@@ -512,7 +511,7 @@ pub trait VariantAccess<'de> {
 /// An implementation of the [`Deserializer`] trait which performs in-place
 /// deserialization.
 #[derive(Clone, Debug, Default)]
-pub enum InplaceDeserializer<'de, D: de::Deserializer<'de>> {
+pub enum InplaceDeserializer<'de, D: serde::Deserializer<'de>> {
     /// The deserializer is not ready.
     #[default]
     None,
@@ -522,7 +521,14 @@ pub enum InplaceDeserializer<'de, D: de::Deserializer<'de>> {
     Deserializer(D),
 }
 
-impl<'de, D: de::Deserializer<'de>> InplaceDeserializer<'de, D> {
+impl<'de, D: serde::Deserializer<'de>> InplaceDeserializer<'de, D> {
+    fn into_result(self, result: DeserializeResult<()>) -> Result<(), D::Error> {
+        result.map_err(|error| match self {
+            InplaceDeserializer::Error(error) => error,
+            _ => error.into_error(),
+        })
+    }
+
     fn deserialize_with<F>(&mut self, f: F) -> InplaceDeserializeResult<()>
     where
         F: FnOnce(D) -> Result<(), D::Error>,
@@ -535,12 +541,11 @@ impl<'de, D: de::Deserializer<'de>> InplaceDeserializer<'de, D> {
                 });
             }
         }
-
         Err(InplaceDeserializeError::NotDeserializer)
     }
 }
 
-impl<'de, D: de::Deserializer<'de>> Deserializer<'de> for InplaceDeserializer<'de, D> {
+impl<'de, D: serde::Deserializer<'de>> Deserializer<'de> for InplaceDeserializer<'de, D> {
     fn dyn_deserialize_any(
         &mut self,
         visitor: &mut dyn Visitor<'de>,
@@ -781,7 +786,7 @@ impl<'de, D: de::Deserializer<'de>> Deserializer<'de> for InplaceDeserializer<'d
 /// An implementation of the [`DeserializeSeed`] trait which performs in-place
 /// deserialization.
 #[derive(Debug, Default)]
-pub enum InplaceDeserializeSeed<'de, T: de::DeserializeSeed<'de>> {
+pub enum InplaceDeserializeSeed<'de, T: serde::de::DeserializeSeed<'de>> {
     /// The deserializer is not ready.
     #[default]
     None,
@@ -791,17 +796,37 @@ pub enum InplaceDeserializeSeed<'de, T: de::DeserializeSeed<'de>> {
     DeserializeSeed(T),
 }
 
-impl<'de, T: de::DeserializeSeed<'de>> InplaceDeserializeSeed<'de, T> {
-    fn expect(self, result: InplaceDeserializeResult<()>) -> InplaceDeserializeResult<T::Value> {
+impl<'de, T: serde::de::DeserializeSeed<'de>> InplaceDeserializeSeed<'de, T> {
+    fn into_result(self, result: InplaceDeserializeResult<()>) -> DeserializeResult<T::Value> {
         match self {
             InplaceDeserializeSeed::Value(value) => Ok(value),
-            // This never panics because `result` is `Ok(_)` if and only if `self` is `Value(_)`.
-            _ => Err(result.unwrap_err()),
+            // This never panics because `result` is `Ok(_)` if and only if
+            // `self` is `Value(_)`. And we have checked that it is't because
+            // of the above branch.
+            _ => Err(DeserializeError::from(result.unwrap_err())),
+        }
+    }
+
+    fn into_result_option(
+        self,
+        result: InplaceDeserializeResult<Option<impl Debug>>,
+    ) -> DeserializeResult<Option<T::Value>> {
+        match result {
+            Ok(None) => Ok(None),
+            result => match self {
+                InplaceDeserializeSeed::Value(value) => Ok(Some(value)),
+                // This never panics because `result` is `Ok(_)` if and only if
+                // `self` is `Value(_)`. And we have checked that it is't
+                // because of the above branch.
+                _ => Err(DeserializeError::from(result.unwrap_err())),
+            },
         }
     }
 }
 
-impl<'de, T: de::DeserializeSeed<'de>> DeserializeSeed<'de> for InplaceDeserializeSeed<'de, T> {
+impl<'de, T: serde::de::DeserializeSeed<'de>> DeserializeSeed<'de>
+    for InplaceDeserializeSeed<'de, T>
+{
     fn dyn_deserialize(
         &mut self,
         deserializer: &mut dyn Deserializer<'de>,
@@ -812,7 +837,6 @@ impl<'de, T: de::DeserializeSeed<'de>> DeserializeSeed<'de> for InplaceDeseriali
                 return Ok(());
             }
         }
-
         Err(DeserializeError::from(
             InplaceDeserializeError::NotDeserializeSeed,
         ))
@@ -824,7 +848,7 @@ impl<'de, T: de::DeserializeSeed<'de>> DeserializeSeed<'de> for InplaceDeseriali
 /// An implementation of the [`Visitor`] trait which performs in-place
 /// deserialization.
 #[derive(Debug, Default)]
-pub enum InplaceVisitor<'de, V: de::Visitor<'de>> {
+pub enum InplaceVisitor<'de, V: serde::de::Visitor<'de>> {
     /// The visitor is not ready.
     #[default]
     None,
@@ -834,12 +858,14 @@ pub enum InplaceVisitor<'de, V: de::Visitor<'de>> {
     Visitor(V),
 }
 
-impl<'de, V: de::Visitor<'de>> InplaceVisitor<'de, V> {
-    fn expect(self, result: InplaceDeserializeResult<()>) -> InplaceDeserializeResult<V::Value> {
+impl<'de, V: serde::de::Visitor<'de>> InplaceVisitor<'de, V> {
+    fn into_result(self, result: InplaceDeserializeResult<()>) -> DeserializeResult<V::Value> {
         match self {
             InplaceVisitor::Value(value) => Ok(value),
-            // This never panics because `result` is `Ok(_)` if and only if `self` is `Value(_)`.
-            _ => Err(result.unwrap_err()),
+            // This never panics because `result` is `Ok(_)` if and only if
+            // `self` is `Value(_)`. And we have checked that it is't because
+            // of the above branch.
+            _ => Err(DeserializeError::from(result.unwrap_err())),
         }
     }
 
@@ -853,12 +879,11 @@ impl<'de, V: de::Visitor<'de>> InplaceVisitor<'de, V> {
                 return Ok(());
             }
         }
-
         Err(DeserializeError::from(InplaceDeserializeError::NotVisitor))
     }
 }
 
-impl<'de, V: de::Visitor<'de>> Visitor<'de> for InplaceVisitor<'de, V> {
+impl<'de, V: serde::de::Visitor<'de>> Visitor<'de> for InplaceVisitor<'de, V> {
     fn dyn_expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
         match self {
             InplaceVisitor::None => formatter.write_str("nothing (the visitor is not ready)"),
@@ -989,14 +1014,21 @@ impl<'de, V: de::Visitor<'de>> Visitor<'de> for InplaceVisitor<'de, V> {
 /// An implementation of the [`SeqAccess`] trait which performs in-place
 /// deserialization.
 #[derive(Clone, Debug)]
-pub enum InplaceSeqAccess<'de, A: de::SeqAccess<'de>> {
+pub enum InplaceSeqAccess<'de, A: serde::de::SeqAccess<'de>> {
     /// The deserialization has done successfully.
     Error(A::Error),
     /// The deserializer is ready to deserialize the sequence.
     SeqAccess(A),
 }
 
-impl<'de, A: de::SeqAccess<'de>> InplaceSeqAccess<'de, A> {
+impl<'de, A: serde::de::SeqAccess<'de>> InplaceSeqAccess<'de, A> {
+    fn into_result(self, result: DeserializeResult<()>) -> Result<(), A::Error> {
+        result.map_err(|error| match self {
+            InplaceSeqAccess::Error(error) => error,
+            _ => error.into_error(),
+        })
+    }
+
     fn next_with<T, F>(&mut self, f: F) -> InplaceDeserializeResult<T>
     where
         F: FnOnce(&mut A) -> Result<T, A::Error>,
@@ -1012,7 +1044,7 @@ impl<'de, A: de::SeqAccess<'de>> InplaceSeqAccess<'de, A> {
     }
 }
 
-impl<'de, A: de::SeqAccess<'de>> SeqAccess<'de> for InplaceSeqAccess<'de, A> {
+impl<'de, A: serde::de::SeqAccess<'de>> SeqAccess<'de> for InplaceSeqAccess<'de, A> {
     fn dyn_next_element(
         &mut self,
         seed: &mut dyn DeserializeSeed<'de>,
@@ -1034,14 +1066,21 @@ impl<'de, A: de::SeqAccess<'de>> SeqAccess<'de> for InplaceSeqAccess<'de, A> {
 /// An implementation of the [`MapAccess`] trait which performs in-place
 /// deserialization.
 #[derive(Clone, Debug)]
-pub enum InplaceMapAccess<'de, A: de::MapAccess<'de>> {
+pub enum InplaceMapAccess<'de, A: serde::de::MapAccess<'de>> {
     /// The deserialization has done successfully.
     Error(A::Error),
     /// The deserializer is ready to deserialize the map.
     MapAccess(A),
 }
 
-impl<'de, A: de::MapAccess<'de>> InplaceMapAccess<'de, A> {
+impl<'de, A: serde::de::MapAccess<'de>> InplaceMapAccess<'de, A> {
+    fn into_result(self, result: DeserializeResult<()>) -> Result<(), A::Error> {
+        result.map_err(|error| match self {
+            InplaceMapAccess::Error(error) => error,
+            _ => error.into_error(),
+        })
+    }
+
     fn next_with<T, F>(&mut self, f: F) -> InplaceDeserializeResult<T>
     where
         F: FnOnce(&mut A) -> Result<T, A::Error>,
@@ -1057,7 +1096,7 @@ impl<'de, A: de::MapAccess<'de>> InplaceMapAccess<'de, A> {
     }
 }
 
-impl<'de, A: de::MapAccess<'de>> MapAccess<'de> for InplaceMapAccess<'de, A> {
+impl<'de, A: serde::de::MapAccess<'de>> MapAccess<'de> for InplaceMapAccess<'de, A> {
     fn dyn_next_key(
         &mut self,
         seed: &mut dyn DeserializeSeed<'de>,
@@ -1094,7 +1133,7 @@ impl<'de, A: de::MapAccess<'de>> MapAccess<'de> for InplaceMapAccess<'de, A> {
 /// An implementation of the [`EnumAccess`] trait which performs in-place
 /// deserialization.
 #[derive(Clone, Debug, Default)]
-pub enum InplaceEnumAccess<'de, A: de::EnumAccess<'de>> {
+pub enum InplaceEnumAccess<'de, A: serde::de::EnumAccess<'de>> {
     /// The deserializer is not ready.
     #[default]
     None,
@@ -1106,7 +1145,14 @@ pub enum InplaceEnumAccess<'de, A: de::EnumAccess<'de>> {
     VariantAccess(A::Variant),
 }
 
-impl<'de, A: de::EnumAccess<'de>> InplaceEnumAccess<'de, A> {
+impl<'de, A: serde::de::EnumAccess<'de>> InplaceEnumAccess<'de, A> {
+    fn into_result(self, result: DeserializeResult<()>) -> Result<(), A::Error> {
+        result.map_err(|error| match self {
+            InplaceEnumAccess::Error(error) => error,
+            _ => error.into_error(),
+        })
+    }
+
     fn next_variant_with<F>(&mut self, f: F) -> InplaceDeserializeResult<()>
     where
         F: FnOnce(A::Variant) -> Result<(), A::Error>,
@@ -1123,7 +1169,7 @@ impl<'de, A: de::EnumAccess<'de>> InplaceEnumAccess<'de, A> {
     }
 }
 
-impl<'de, A: de::EnumAccess<'de>> EnumAccess<'de> for InplaceEnumAccess<'de, A> {
+impl<'de, A: serde::de::EnumAccess<'de>> EnumAccess<'de> for InplaceEnumAccess<'de, A> {
     fn dyn_variant(
         &mut self,
         seed: &mut dyn DeserializeSeed<'de>,
@@ -1146,7 +1192,7 @@ impl<'de, A: de::EnumAccess<'de>> EnumAccess<'de> for InplaceEnumAccess<'de, A> 
     }
 }
 
-impl<'de, A: de::EnumAccess<'de>> VariantAccess<'de> for InplaceEnumAccess<'de, A> {
+impl<'de, A: serde::de::EnumAccess<'de>> VariantAccess<'de> for InplaceEnumAccess<'de, A> {
     fn dyn_unit_variant(&mut self) -> InplaceDeserializeResult<()> {
         self.next_variant_with(|access| access.unit_variant())
     }
@@ -1231,445 +1277,574 @@ impl Error for InplaceDeserializeError {}
 ///
 /// [`dyn Deserializer`]: Deserializer
 #[repr(transparent)]
-pub struct DeserializeError(Box<DeserializeErrorData>);
+// OPTIMIZE: use a more memory-effective representation.
+pub struct DeserializeError(InplaceDeserializeResult<Box<str>>);
 
-// TODO: !!!OPTIMIZE ME!!!
-enum DeserializeErrorData {
-    Either(InplaceDeserializeError),
-    Or(String),
+impl DeserializeError {
+    fn into_error<E>(self) -> E
+    where
+        E: serde::de::Error,
+    {
+        match self.0 {
+            Ok(error) => E::custom(error.into_string()),
+            Err(error) => E::custom(error),
+        }
+    }
 }
 
 impl Debug for DeserializeError {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        f.debug_tuple("DeserializeError")
-            .field(match self.0.as_ref() {
-                DeserializeErrorData::Either(error) => error,
-                DeserializeErrorData::Or(error) => error,
-            })
-            .finish()
+        Display::fmt(self, f)
     }
 }
 
 impl Display for DeserializeError {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        match self.0.as_ref() {
-            DeserializeErrorData::Either(error) => Display::fmt(error, f),
-            DeserializeErrorData::Or(error) => f.write_str(error),
+        match self.0 {
+            Ok(ref error) => f.write_str(error),
+            Err(ref error) => Display::fmt(error, f),
         }
     }
 }
 
-impl Error for DeserializeError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self.0.as_ref() {
-            DeserializeErrorData::Either(error) => Some(error),
-            DeserializeErrorData::Or(_) => None,
-        }
-    }
-}
-
-impl DeError for DeserializeError {
-    #[cold]
-    #[inline(never)]
-    fn custom<T: Display>(msg: T) -> Self {
-        DeserializeError(Box::new(DeserializeErrorData::Or(msg.to_string())))
-    }
-}
+impl Error for DeserializeError {}
 
 impl From<InplaceDeserializeError> for DeserializeError {
     #[cold]
     #[inline(never)]
     fn from(value: InplaceDeserializeError) -> Self {
-        DeserializeError(Box::new(DeserializeErrorData::Either(value)))
+        DeserializeError(Err(value))
+    }
+}
+
+impl serde::de::Error for DeserializeError {
+    #[cold]
+    #[inline(never)]
+    fn custom<T: Display>(msg: T) -> Self {
+        DeserializeError(Ok(msg.to_string().into_boxed_str()))
     }
 }
 
 // TRAIT IMPLEMENTATION
 // ----------------------------------------------------------------------------
-impl<'de> de::Deserializer<'de> for &mut (dyn Deserializer<'de> + '_) {
+impl<'de> serde::Deserializer<'de> for &mut (dyn Deserializer<'de> + '_) {
     type Error = DeserializeError;
 
-    fn deserialize_any<V: de::Visitor<'de>>(self, visitor: V) -> DeserializeResult<V::Value> {
+    fn deserialize_any<V>(self, visitor: V) -> DeserializeResult<V::Value>
+    where
+        V: serde::de::Visitor<'de>,
+    {
         let mut visitor = InplaceVisitor::Visitor(visitor);
         let result = self.dyn_deserialize_any(&mut visitor);
-        visitor.expect(result).map_err(DeserializeError::from)
+        visitor.into_result(result)
     }
 
-    fn deserialize_bool<V: de::Visitor<'de>>(self, visitor: V) -> DeserializeResult<V::Value> {
+    fn deserialize_bool<V>(self, visitor: V) -> DeserializeResult<V::Value>
+    where
+        V: serde::de::Visitor<'de>,
+    {
         let mut visitor = InplaceVisitor::Visitor(visitor);
         let result = self.dyn_deserialize_any(&mut visitor);
-        visitor.expect(result).map_err(DeserializeError::from)
+        visitor.into_result(result)
     }
 
-    fn deserialize_i8<V: de::Visitor<'de>>(self, visitor: V) -> DeserializeResult<V::Value> {
+    fn deserialize_i8<V>(self, visitor: V) -> DeserializeResult<V::Value>
+    where
+        V: serde::de::Visitor<'de>,
+    {
         let mut visitor = InplaceVisitor::Visitor(visitor);
         let result = self.dyn_deserialize_i8(&mut visitor);
-        visitor.expect(result).map_err(DeserializeError::from)
+        visitor.into_result(result)
     }
 
-    fn deserialize_i16<V: de::Visitor<'de>>(self, visitor: V) -> DeserializeResult<V::Value> {
+    fn deserialize_i16<V>(self, visitor: V) -> DeserializeResult<V::Value>
+    where
+        V: serde::de::Visitor<'de>,
+    {
         let mut visitor = InplaceVisitor::Visitor(visitor);
         let result = self.dyn_deserialize_i16(&mut visitor);
-        visitor.expect(result).map_err(DeserializeError::from)
+        visitor.into_result(result)
     }
 
-    fn deserialize_i32<V: de::Visitor<'de>>(self, visitor: V) -> DeserializeResult<V::Value> {
+    fn deserialize_i32<V>(self, visitor: V) -> DeserializeResult<V::Value>
+    where
+        V: serde::de::Visitor<'de>,
+    {
         let mut visitor = InplaceVisitor::Visitor(visitor);
         let result = self.dyn_deserialize_i32(&mut visitor);
-        visitor.expect(result).map_err(DeserializeError::from)
+        visitor.into_result(result)
     }
 
-    fn deserialize_i64<V: de::Visitor<'de>>(self, visitor: V) -> DeserializeResult<V::Value> {
+    fn deserialize_i64<V>(self, visitor: V) -> DeserializeResult<V::Value>
+    where
+        V: serde::de::Visitor<'de>,
+    {
         let mut visitor = InplaceVisitor::Visitor(visitor);
         let result = self.dyn_deserialize_i64(&mut visitor);
-        visitor.expect(result).map_err(DeserializeError::from)
+        visitor.into_result(result)
     }
 
-    fn deserialize_u8<V: de::Visitor<'de>>(self, visitor: V) -> DeserializeResult<V::Value> {
+    fn deserialize_u8<V>(self, visitor: V) -> DeserializeResult<V::Value>
+    where
+        V: serde::de::Visitor<'de>,
+    {
         let mut visitor = InplaceVisitor::Visitor(visitor);
         let result = self.dyn_deserialize_u8(&mut visitor);
-        visitor.expect(result).map_err(DeserializeError::from)
+        visitor.into_result(result)
     }
 
-    fn deserialize_u16<V: de::Visitor<'de>>(self, visitor: V) -> DeserializeResult<V::Value> {
+    fn deserialize_u16<V>(self, visitor: V) -> DeserializeResult<V::Value>
+    where
+        V: serde::de::Visitor<'de>,
+    {
         let mut visitor = InplaceVisitor::Visitor(visitor);
         let result = self.dyn_deserialize_u16(&mut visitor);
-        visitor.expect(result).map_err(DeserializeError::from)
+        visitor.into_result(result)
     }
 
-    fn deserialize_u32<V: de::Visitor<'de>>(self, visitor: V) -> DeserializeResult<V::Value> {
+    fn deserialize_u32<V>(self, visitor: V) -> DeserializeResult<V::Value>
+    where
+        V: serde::de::Visitor<'de>,
+    {
         let mut visitor = InplaceVisitor::Visitor(visitor);
         let result = self.dyn_deserialize_u32(&mut visitor);
-        visitor.expect(result).map_err(DeserializeError::from)
+        visitor.into_result(result)
     }
 
-    fn deserialize_u64<V: de::Visitor<'de>>(self, visitor: V) -> DeserializeResult<V::Value> {
+    fn deserialize_u64<V>(self, visitor: V) -> DeserializeResult<V::Value>
+    where
+        V: serde::de::Visitor<'de>,
+    {
         let mut visitor = InplaceVisitor::Visitor(visitor);
         let result = self.dyn_deserialize_u64(&mut visitor);
-        visitor.expect(result).map_err(DeserializeError::from)
+        visitor.into_result(result)
     }
 
-    fn deserialize_f32<V: de::Visitor<'de>>(self, visitor: V) -> DeserializeResult<V::Value> {
+    fn deserialize_f32<V>(self, visitor: V) -> DeserializeResult<V::Value>
+    where
+        V: serde::de::Visitor<'de>,
+    {
         let mut visitor = InplaceVisitor::Visitor(visitor);
         let result = self.dyn_deserialize_f32(&mut visitor);
-        visitor.expect(result).map_err(DeserializeError::from)
+        visitor.into_result(result)
     }
 
-    fn deserialize_f64<V: de::Visitor<'de>>(self, visitor: V) -> DeserializeResult<V::Value> {
+    fn deserialize_f64<V>(self, visitor: V) -> DeserializeResult<V::Value>
+    where
+        V: serde::de::Visitor<'de>,
+    {
         let mut visitor = InplaceVisitor::Visitor(visitor);
         let result = self.dyn_deserialize_f64(&mut visitor);
-        visitor.expect(result).map_err(DeserializeError::from)
+        visitor.into_result(result)
     }
 
-    fn deserialize_char<V: de::Visitor<'de>>(self, visitor: V) -> DeserializeResult<V::Value> {
+    fn deserialize_char<V>(self, visitor: V) -> DeserializeResult<V::Value>
+    where
+        V: serde::de::Visitor<'de>,
+    {
         let mut visitor = InplaceVisitor::Visitor(visitor);
         let result = self.dyn_deserialize_char(&mut visitor);
-        visitor.expect(result).map_err(DeserializeError::from)
+        visitor.into_result(result)
     }
 
-    fn deserialize_str<V: de::Visitor<'de>>(self, visitor: V) -> DeserializeResult<V::Value> {
+    fn deserialize_str<V>(self, visitor: V) -> DeserializeResult<V::Value>
+    where
+        V: serde::de::Visitor<'de>,
+    {
         let mut visitor = InplaceVisitor::Visitor(visitor);
         let result = self.dyn_deserialize_str(&mut visitor);
-        visitor.expect(result).map_err(DeserializeError::from)
+        visitor.into_result(result)
     }
 
-    fn deserialize_string<V: de::Visitor<'de>>(self, visitor: V) -> DeserializeResult<V::Value> {
+    fn deserialize_string<V>(self, visitor: V) -> DeserializeResult<V::Value>
+    where
+        V: serde::de::Visitor<'de>,
+    {
         let mut visitor = InplaceVisitor::Visitor(visitor);
         let result = self.dyn_deserialize_string(&mut visitor);
-        visitor.expect(result).map_err(DeserializeError::from)
+        visitor.into_result(result)
     }
 
-    fn deserialize_bytes<V: de::Visitor<'de>>(self, visitor: V) -> DeserializeResult<V::Value> {
+    fn deserialize_bytes<V>(self, visitor: V) -> DeserializeResult<V::Value>
+    where
+        V: serde::de::Visitor<'de>,
+    {
         let mut visitor = InplaceVisitor::Visitor(visitor);
         let result = self.dyn_deserialize_bytes(&mut visitor);
-        visitor.expect(result).map_err(DeserializeError::from)
+        visitor.into_result(result)
     }
 
-    fn deserialize_byte_buf<V: de::Visitor<'de>>(self, visitor: V) -> DeserializeResult<V::Value> {
+    fn deserialize_byte_buf<V>(self, visitor: V) -> DeserializeResult<V::Value>
+    where
+        V: serde::de::Visitor<'de>,
+    {
         let mut visitor = InplaceVisitor::Visitor(visitor);
         let result = self.dyn_deserialize_byte_buf(&mut visitor);
-        visitor.expect(result).map_err(DeserializeError::from)
+        visitor.into_result(result)
     }
 
-    fn deserialize_option<V: de::Visitor<'de>>(self, visitor: V) -> DeserializeResult<V::Value> {
+    fn deserialize_option<V>(self, visitor: V) -> DeserializeResult<V::Value>
+    where
+        V: serde::de::Visitor<'de>,
+    {
         let mut visitor = InplaceVisitor::Visitor(visitor);
         let result = self.dyn_deserialize_option(&mut visitor);
-        visitor.expect(result).map_err(DeserializeError::from)
+        visitor.into_result(result)
     }
 
-    fn deserialize_unit<V: de::Visitor<'de>>(self, visitor: V) -> DeserializeResult<V::Value> {
+    fn deserialize_unit<V>(self, visitor: V) -> DeserializeResult<V::Value>
+    where
+        V: serde::de::Visitor<'de>,
+    {
         let mut visitor = InplaceVisitor::Visitor(visitor);
         let result = self.dyn_deserialize_unit(&mut visitor);
-        visitor.expect(result).map_err(DeserializeError::from)
+        visitor.into_result(result)
     }
 
-    fn deserialize_unit_struct<V: de::Visitor<'de>>(
+    fn deserialize_unit_struct<V>(
         self,
         name: &'static str,
         visitor: V,
-    ) -> DeserializeResult<V::Value> {
+    ) -> DeserializeResult<V::Value>
+    where
+        V: serde::de::Visitor<'de>,
+    {
         let mut visitor = InplaceVisitor::Visitor(visitor);
         let result = self.dyn_deserialize_unit_struct(name, &mut visitor);
-        visitor.expect(result).map_err(DeserializeError::from)
+        visitor.into_result(result)
     }
 
-    fn deserialize_newtype_struct<V: de::Visitor<'de>>(
+    fn deserialize_newtype_struct<V>(
         self,
         name: &'static str,
         visitor: V,
-    ) -> DeserializeResult<V::Value> {
+    ) -> DeserializeResult<V::Value>
+    where
+        V: serde::de::Visitor<'de>,
+    {
         let mut visitor = InplaceVisitor::Visitor(visitor);
         let result = self.dyn_deserialize_newtype_struct(name, &mut visitor);
-        visitor.expect(result).map_err(DeserializeError::from)
+        visitor.into_result(result)
     }
 
-    fn deserialize_seq<V: de::Visitor<'de>>(self, visitor: V) -> DeserializeResult<V::Value> {
+    fn deserialize_seq<V>(self, visitor: V) -> DeserializeResult<V::Value>
+    where
+        V: serde::de::Visitor<'de>,
+    {
         let mut visitor = InplaceVisitor::Visitor(visitor);
         let result = self.dyn_deserialize_seq(&mut visitor);
-        visitor.expect(result).map_err(DeserializeError::from)
+        visitor.into_result(result)
     }
 
-    fn deserialize_tuple<V: de::Visitor<'de>>(
-        self,
-        len: usize,
-        visitor: V,
-    ) -> DeserializeResult<V::Value> {
+    fn deserialize_tuple<V>(self, len: usize, visitor: V) -> DeserializeResult<V::Value>
+    where
+        V: serde::de::Visitor<'de>,
+    {
         let mut visitor = InplaceVisitor::Visitor(visitor);
         let result = self.dyn_deserialize_tuple(len, &mut visitor);
-        visitor.expect(result).map_err(DeserializeError::from)
+        visitor.into_result(result)
     }
 
-    fn deserialize_tuple_struct<V: de::Visitor<'de>>(
+    fn deserialize_tuple_struct<V>(
         self,
         name: &'static str,
         len: usize,
         visitor: V,
-    ) -> DeserializeResult<V::Value> {
+    ) -> DeserializeResult<V::Value>
+    where
+        V: serde::de::Visitor<'de>,
+    {
         let mut visitor = InplaceVisitor::Visitor(visitor);
         let result = self.dyn_deserialize_tuple_struct(name, len, &mut visitor);
-        visitor.expect(result).map_err(DeserializeError::from)
+        visitor.into_result(result)
     }
 
-    fn deserialize_map<V: de::Visitor<'de>>(self, visitor: V) -> DeserializeResult<V::Value> {
+    fn deserialize_map<V>(self, visitor: V) -> DeserializeResult<V::Value>
+    where
+        V: serde::de::Visitor<'de>,
+    {
         let mut visitor = InplaceVisitor::Visitor(visitor);
         let result = self.dyn_deserialize_map(&mut visitor);
-        visitor.expect(result).map_err(DeserializeError::from)
+        visitor.into_result(result)
     }
 
-    fn deserialize_struct<V: de::Visitor<'de>>(
+    fn deserialize_struct<V>(
         self,
         name: &'static str,
         fields: &'static [&'static str],
         visitor: V,
-    ) -> DeserializeResult<V::Value> {
+    ) -> DeserializeResult<V::Value>
+    where
+        V: serde::de::Visitor<'de>,
+    {
         let mut visitor = InplaceVisitor::Visitor(visitor);
         let result = self.dyn_deserialize_struct(name, fields, &mut visitor);
-        visitor.expect(result).map_err(DeserializeError::from)
+        visitor.into_result(result)
     }
 
-    fn deserialize_enum<V: de::Visitor<'de>>(
+    fn deserialize_enum<V>(
         self,
         name: &'static str,
         variants: &'static [&'static str],
         visitor: V,
-    ) -> DeserializeResult<V::Value> {
+    ) -> DeserializeResult<V::Value>
+    where
+        V: serde::de::Visitor<'de>,
+    {
         let mut visitor = InplaceVisitor::Visitor(visitor);
         let result = self.dyn_deserialize_enum(name, variants, &mut visitor);
-        visitor.expect(result).map_err(DeserializeError::from)
+        visitor.into_result(result)
     }
 
-    fn deserialize_identifier<V: de::Visitor<'de>>(
-        self,
-        visitor: V,
-    ) -> DeserializeResult<V::Value> {
+    fn deserialize_identifier<V>(self, visitor: V) -> DeserializeResult<V::Value>
+    where
+        V: serde::de::Visitor<'de>,
+    {
         let mut visitor = InplaceVisitor::Visitor(visitor);
         let result = self.dyn_deserialize_identifier(&mut visitor);
-        visitor.expect(result).map_err(DeserializeError::from)
+        visitor.into_result(result)
     }
 
-    fn deserialize_ignored_any<V: de::Visitor<'de>>(
-        self,
-        visitor: V,
-    ) -> DeserializeResult<V::Value> {
+    fn deserialize_ignored_any<V>(self, visitor: V) -> DeserializeResult<V::Value>
+    where
+        V: serde::de::Visitor<'de>,
+    {
         let mut visitor = InplaceVisitor::Visitor(visitor);
         let result = self.dyn_deserialize_ignored_any(&mut visitor);
-        visitor.expect(result).map_err(DeserializeError::from)
+        visitor.into_result(result)
     }
 }
 
-impl<'de> de::DeserializeSeed<'de> for &mut (dyn DeserializeSeed<'de> + '_) {
+impl<'de> serde::de::DeserializeSeed<'de> for &mut (dyn DeserializeSeed<'de> + '_) {
     type Value = ();
 
-    fn deserialize<D: de::Deserializer<'de>>(self, deserializer: D) -> Result<(), D::Error> {
+    fn deserialize<D>(self, deserializer: D) -> Result<(), D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
         let mut deserializer = InplaceDeserializer::Deserializer(deserializer);
-        self.dyn_deserialize(&mut deserializer)
-            .map_err(|error| match deserializer {
-                InplaceDeserializer::Error(error) => error,
-                _ => de::Error::custom(error),
-            })
+        let result = self.dyn_deserialize(&mut deserializer);
+        deserializer.into_result(result)
     }
 }
 
-impl<'de> de::Visitor<'de> for &mut (dyn Visitor<'de> + '_) {
+impl<'de> serde::de::Visitor<'de> for &mut (dyn Visitor<'de> + '_) {
     type Value = ();
 
     fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
         self.dyn_expecting(formatter)
     }
 
-    fn visit_bool<E: de::Error>(self, v: bool) -> Result<(), E> {
+    fn visit_bool<E>(self, v: bool) -> Result<(), E>
+    where
+        E: serde::de::Error,
+    {
         self.dyn_visit_bool(v).map_err(E::custom)
     }
 
-    fn visit_i8<E: de::Error>(self, v: i8) -> Result<(), E> {
+    fn visit_i8<E>(self, v: i8) -> Result<(), E>
+    where
+        E: serde::de::Error,
+    {
         self.dyn_visit_i8(v).map_err(E::custom)
     }
 
-    fn visit_i16<E: de::Error>(self, v: i16) -> Result<(), E> {
+    fn visit_i16<E>(self, v: i16) -> Result<(), E>
+    where
+        E: serde::de::Error,
+    {
         self.dyn_visit_i16(v).map_err(E::custom)
     }
 
-    fn visit_i32<E: de::Error>(self, v: i32) -> Result<(), E> {
+    fn visit_i32<E>(self, v: i32) -> Result<(), E>
+    where
+        E: serde::de::Error,
+    {
         self.dyn_visit_i32(v).map_err(E::custom)
     }
 
-    fn visit_i64<E: de::Error>(self, v: i64) -> Result<(), E> {
+    fn visit_i64<E>(self, v: i64) -> Result<(), E>
+    where
+        E: serde::de::Error,
+    {
         self.dyn_visit_i64(v).map_err(E::custom)
     }
 
-    fn visit_i128<E: de::Error>(self, v: i128) -> Result<(), E> {
+    fn visit_i128<E>(self, v: i128) -> Result<(), E>
+    where
+        E: serde::de::Error,
+    {
         self.dyn_visit_i128(v).map_err(E::custom)
     }
 
-    fn visit_u8<E: de::Error>(self, v: u8) -> Result<(), E> {
+    fn visit_u8<E>(self, v: u8) -> Result<(), E>
+    where
+        E: serde::de::Error,
+    {
         self.dyn_visit_u8(v).map_err(E::custom)
     }
 
-    fn visit_u16<E: de::Error>(self, v: u16) -> Result<(), E> {
+    fn visit_u16<E>(self, v: u16) -> Result<(), E>
+    where
+        E: serde::de::Error,
+    {
         self.dyn_visit_u16(v).map_err(E::custom)
     }
 
-    fn visit_u32<E: de::Error>(self, v: u32) -> Result<(), E> {
+    fn visit_u32<E>(self, v: u32) -> Result<(), E>
+    where
+        E: serde::de::Error,
+    {
         self.dyn_visit_u32(v).map_err(E::custom)
     }
 
-    fn visit_u64<E: de::Error>(self, v: u64) -> Result<(), E> {
+    fn visit_u64<E>(self, v: u64) -> Result<(), E>
+    where
+        E: serde::de::Error,
+    {
         self.dyn_visit_u64(v).map_err(E::custom)
     }
 
-    fn visit_u128<E: de::Error>(self, v: u128) -> Result<(), E> {
+    fn visit_u128<E>(self, v: u128) -> Result<(), E>
+    where
+        E: serde::de::Error,
+    {
         self.dyn_visit_u128(v).map_err(E::custom)
     }
 
-    fn visit_f32<E: de::Error>(self, v: f32) -> Result<(), E> {
+    fn visit_f32<E>(self, v: f32) -> Result<(), E>
+    where
+        E: serde::de::Error,
+    {
         self.dyn_visit_f32(v).map_err(E::custom)
     }
 
-    fn visit_f64<E: de::Error>(self, v: f64) -> Result<(), E> {
+    fn visit_f64<E>(self, v: f64) -> Result<(), E>
+    where
+        E: serde::de::Error,
+    {
         self.dyn_visit_f64(v).map_err(E::custom)
     }
 
-    fn visit_char<E: de::Error>(self, v: char) -> Result<(), E> {
+    fn visit_char<E>(self, v: char) -> Result<(), E>
+    where
+        E: serde::de::Error,
+    {
         self.dyn_visit_char(v).map_err(E::custom)
     }
 
-    fn visit_str<E: de::Error>(self, v: &str) -> Result<(), E> {
+    fn visit_str<E>(self, v: &str) -> Result<(), E>
+    where
+        E: serde::de::Error,
+    {
         self.dyn_visit_str(v).map_err(E::custom)
     }
 
-    fn visit_borrowed_str<E: de::Error>(self, v: &'de str) -> Result<(), E> {
+    fn visit_borrowed_str<E>(self, v: &'de str) -> Result<(), E>
+    where
+        E: serde::de::Error,
+    {
         self.dyn_visit_borrowed_str(v).map_err(E::custom)
     }
 
-    fn visit_string<E: de::Error>(self, v: String) -> Result<(), E> {
+    fn visit_string<E>(self, v: String) -> Result<(), E>
+    where
+        E: serde::de::Error,
+    {
         self.dyn_visit_string(v).map_err(E::custom)
     }
 
-    fn visit_bytes<E: de::Error>(self, v: &[u8]) -> Result<(), E> {
+    fn visit_bytes<E>(self, v: &[u8]) -> Result<(), E>
+    where
+        E: serde::de::Error,
+    {
         self.dyn_visit_bytes(v).map_err(E::custom)
     }
 
-    fn visit_borrowed_bytes<E: de::Error>(self, v: &'de [u8]) -> Result<(), E> {
+    fn visit_borrowed_bytes<E>(self, v: &'de [u8]) -> Result<(), E>
+    where
+        E: serde::de::Error,
+    {
         self.dyn_visit_borrowed_bytes(v).map_err(E::custom)
     }
 
-    fn visit_byte_buf<E: de::Error>(self, v: Vec<u8>) -> Result<(), E> {
+    fn visit_byte_buf<E>(self, v: Vec<u8>) -> Result<(), E>
+    where
+        E: serde::de::Error,
+    {
         self.dyn_visit_byte_buf(v).map_err(E::custom)
     }
 
-    fn visit_none<E: de::Error>(self) -> Result<(), E> {
+    fn visit_none<E>(self) -> Result<(), E>
+    where
+        E: serde::de::Error,
+    {
         self.dyn_visit_none().map_err(E::custom)
     }
 
-    fn visit_some<D: de::Deserializer<'de>>(self, deserializer: D) -> Result<(), D::Error> {
+    fn visit_some<D>(self, deserializer: D) -> Result<(), D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
         let mut deserializer = InplaceDeserializer::Deserializer(deserializer);
-        self.dyn_visit_some(&mut deserializer)
-            .map_err(|error| match deserializer {
-                InplaceDeserializer::Error(error) => error,
-                _ => de::Error::custom(error),
-            })
+        let result = self.dyn_visit_some(&mut deserializer);
+        deserializer.into_result(result)
     }
 
-    fn visit_unit<E: de::Error>(self) -> Result<(), E> {
+    fn visit_unit<E>(self) -> Result<(), E>
+    where
+        E: serde::de::Error,
+    {
         self.dyn_visit_unit().map_err(E::custom)
     }
 
-    fn visit_newtype_struct<D: de::Deserializer<'de>>(
-        self,
-        deserializer: D,
-    ) -> Result<(), D::Error> {
+    fn visit_newtype_struct<D>(self, deserializer: D) -> Result<(), D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
         let mut deserializer = InplaceDeserializer::Deserializer(deserializer);
-        self.dyn_visit_newtype_struct(&mut deserializer)
-            .map_err(|error| match deserializer {
-                InplaceDeserializer::Error(error) => error,
-                _ => de::Error::custom(error),
-            })
+        let result = self.dyn_visit_newtype_struct(&mut deserializer);
+        deserializer.into_result(result)
     }
 
-    fn visit_seq<A: de::SeqAccess<'de>>(self, access: A) -> Result<(), A::Error> {
+    fn visit_seq<A>(self, access: A) -> Result<(), A::Error>
+    where
+        A: serde::de::SeqAccess<'de>,
+    {
         let mut access = InplaceSeqAccess::SeqAccess(access);
-        self.dyn_visit_seq(&mut access)
-            .map_err(|error| match access {
-                InplaceSeqAccess::Error(error) => error,
-                _ => de::Error::custom(error),
-            })
+        let result = self.dyn_visit_seq(&mut access);
+        access.into_result(result)
     }
 
-    fn visit_map<A: de::MapAccess<'de>>(self, access: A) -> Result<(), A::Error> {
+    fn visit_map<A>(self, access: A) -> Result<(), A::Error>
+    where
+        A: serde::de::MapAccess<'de>,
+    {
         let mut access = InplaceMapAccess::MapAccess(access);
-        self.dyn_visit_map(&mut access)
-            .map_err(|error| match access {
-                InplaceMapAccess::Error(error) => error,
-                _ => de::Error::custom(error),
-            })
+        let result = self.dyn_visit_map(&mut access);
+        access.into_result(result)
     }
 
-    fn visit_enum<A: de::EnumAccess<'de>>(self, access: A) -> Result<(), A::Error> {
+    fn visit_enum<A>(self, access: A) -> Result<(), A::Error>
+    where
+        A: serde::de::EnumAccess<'de>,
+    {
         let mut access = InplaceEnumAccess::EnumAccess(access);
-        self.dyn_visit_enum(&mut access)
-            .map_err(|error| match access {
-                InplaceEnumAccess::Error(error) => error,
-                _ => de::Error::custom(error),
-            })
+        let result = self.dyn_visit_enum(&mut access);
+        access.into_result(result)
     }
 }
 
-impl<'de> de::SeqAccess<'de> for &mut (dyn SeqAccess<'de> + '_) {
+impl<'de> serde::de::SeqAccess<'de> for &mut (dyn SeqAccess<'de> + '_) {
     type Error = DeserializeError;
 
-    fn next_element_seed<T: de::DeserializeSeed<'de>>(
-        &mut self,
-        seed: T,
-    ) -> DeserializeResult<Option<T::Value>> {
+    fn next_element_seed<T>(&mut self, seed: T) -> DeserializeResult<Option<T::Value>>
+    where
+        T: serde::de::DeserializeSeed<'de>,
+    {
         let mut seed = InplaceDeserializeSeed::DeserializeSeed(seed);
-        match self.dyn_next_element(&mut seed) {
-            Ok(None) => Ok(None),
-            result => match seed {
-                InplaceDeserializeSeed::Value(value) => Ok(Some(value)),
-                // This never panics because `result` is `Ok(_)` if and only if `self` is `Value(_)`.
-                _ => Err(DeserializeError::from(result.unwrap_err())),
-            },
-        }
+        let result = self.dyn_next_element(&mut seed);
+        seed.into_result_option(result)
     }
 
     fn size_hint(&self) -> Option<usize> {
@@ -1677,31 +1852,25 @@ impl<'de> de::SeqAccess<'de> for &mut (dyn SeqAccess<'de> + '_) {
     }
 }
 
-impl<'de> de::MapAccess<'de> for &mut (dyn MapAccess<'de> + '_) {
+impl<'de> serde::de::MapAccess<'de> for &mut (dyn MapAccess<'de> + '_) {
     type Error = DeserializeError;
 
-    fn next_key_seed<K: de::DeserializeSeed<'de>>(
-        &mut self,
-        seed: K,
-    ) -> DeserializeResult<Option<K::Value>> {
+    fn next_key_seed<K>(&mut self, seed: K) -> DeserializeResult<Option<K::Value>>
+    where
+        K: serde::de::DeserializeSeed<'de>,
+    {
         let mut seed = InplaceDeserializeSeed::DeserializeSeed(seed);
-        match self.dyn_next_key(&mut seed) {
-            Ok(None) => Ok(None),
-            result => match seed {
-                InplaceDeserializeSeed::Value(value) => Ok(Some(value)),
-                // This never panics because `result` is `Ok(_)` if and only if `seed` is `Value(_)`.
-                _ => Err(DeserializeError::from(result.unwrap_err())),
-            },
-        }
+        let result = self.dyn_next_key(&mut seed);
+        seed.into_result_option(result)
     }
 
-    fn next_value_seed<V: de::DeserializeSeed<'de>>(
-        &mut self,
-        seed: V,
-    ) -> DeserializeResult<V::Value> {
+    fn next_value_seed<V>(&mut self, seed: V) -> DeserializeResult<V::Value>
+    where
+        V: serde::de::DeserializeSeed<'de>,
+    {
         let mut seed = InplaceDeserializeSeed::DeserializeSeed(seed);
         let result = self.dyn_next_value(&mut seed);
-        seed.expect(result).map_err(DeserializeError::from)
+        seed.into_result(result)
     }
 
     fn next_entry_seed<K, V>(
@@ -1710,23 +1879,22 @@ impl<'de> de::MapAccess<'de> for &mut (dyn MapAccess<'de> + '_) {
         vseed: V,
     ) -> DeserializeResult<Option<(K::Value, V::Value)>>
     where
-        K: de::DeserializeSeed<'de>,
-        V: de::DeserializeSeed<'de>,
+        K: serde::de::DeserializeSeed<'de>,
+        V: serde::de::DeserializeSeed<'de>,
     {
         let mut kseed = InplaceDeserializeSeed::DeserializeSeed(kseed);
         let mut vseed = InplaceDeserializeSeed::DeserializeSeed(vseed);
-        match self.dyn_next_entry(&mut kseed, &mut vseed) {
-            Ok(None) => Ok(None),
-            result => match (kseed, vseed) {
-                (InplaceDeserializeSeed::Value(k), InplaceDeserializeSeed::Value(v)) => {
-                    Ok(Some((k, v)))
-                }
-                // This never panics because we have checked that `result` is not `Ok(None)`.
-                // And the `result` is `Ok(Some(_))` if and only if both `kseed` and `vseed`
-                // are `Value(_)`s.
-                _ => Err(DeserializeError::from(result.unwrap_err())),
-            },
-        }
+
+        let result = self.dyn_next_entry(&mut kseed, &mut vseed);
+        vseed.into_result_option(result).map(|opt_value| {
+            opt_value.map(|value| match kseed {
+                InplaceDeserializeSeed::Value(key) => (key, value),
+                // This is unreachable because we have checked that the value
+                // has been successfully deserialized. Thus the key must be
+                // deserialized successfully before the value.
+                _ => unreachable!(),
+            })
+        })
     }
 
     fn size_hint(&self) -> Option<usize> {
@@ -1734,59 +1902,62 @@ impl<'de> de::MapAccess<'de> for &mut (dyn MapAccess<'de> + '_) {
     }
 }
 
-impl<'a, 'de> de::EnumAccess<'de> for &'a mut (dyn EnumAccess<'de> + '_) {
+impl<'a, 'de> serde::de::EnumAccess<'de> for &'a mut (dyn EnumAccess<'de> + '_) {
     type Error = DeserializeError;
     type Variant = &'a mut dyn VariantAccess<'de>;
 
-    fn variant_seed<V: de::DeserializeSeed<'de>>(
-        self,
-        seed: V,
-    ) -> DeserializeResult<(V::Value, Self::Variant)> {
+    fn variant_seed<V>(self, seed: V) -> DeserializeResult<(V::Value, Self::Variant)>
+    where
+        V: serde::de::DeserializeSeed<'de>,
+    {
         let mut seed = InplaceDeserializeSeed::DeserializeSeed(seed);
         let result = self.dyn_variant(&mut seed);
         match (seed, result) {
             (InplaceDeserializeSeed::Value(value), Ok(variant)) => Ok((value, variant)),
             (_, Err(error)) => Err(DeserializeError::from(error)),
             // This is unreachable because `result` is `Ok(_)` if and only if
-            // the `seed` is `Value(_)`.
+            // the `seed` is `Value(_)`. Thus the two branches would cover all
+            // cases.
             (_, Ok(_)) => unreachable!(),
         }
     }
 }
 
-impl<'de> de::VariantAccess<'de> for &mut (dyn VariantAccess<'de> + '_) {
+impl<'de> serde::de::VariantAccess<'de> for &mut (dyn VariantAccess<'de> + '_) {
     type Error = DeserializeError;
 
     fn unit_variant(self) -> DeserializeResult<()> {
         self.dyn_unit_variant().map_err(DeserializeError::from)
     }
 
-    fn newtype_variant_seed<T: de::DeserializeSeed<'de>>(
-        self,
-        seed: T,
-    ) -> DeserializeResult<T::Value> {
+    fn newtype_variant_seed<T>(self, seed: T) -> DeserializeResult<T::Value>
+    where
+        T: serde::de::DeserializeSeed<'de>,
+    {
         let mut seed = InplaceDeserializeSeed::DeserializeSeed(seed);
         let result = self.dyn_newtype_variant(&mut seed);
-        seed.expect(result).map_err(DeserializeError::from)
+        seed.into_result(result)
     }
 
-    fn tuple_variant<V: de::Visitor<'de>>(
-        self,
-        len: usize,
-        visitor: V,
-    ) -> DeserializeResult<V::Value> {
+    fn tuple_variant<V>(self, len: usize, visitor: V) -> DeserializeResult<V::Value>
+    where
+        V: serde::de::Visitor<'de>,
+    {
         let mut visitor = InplaceVisitor::Visitor(visitor);
         let result = self.dyn_tuple_variant(len, &mut visitor);
-        visitor.expect(result).map_err(DeserializeError::from)
+        visitor.into_result(result)
     }
 
-    fn struct_variant<V: de::Visitor<'de>>(
+    fn struct_variant<V>(
         self,
         fields: &'static [&'static str],
         visitor: V,
-    ) -> DeserializeResult<V::Value> {
+    ) -> DeserializeResult<V::Value>
+    where
+        V: serde::de::Visitor<'de>,
+    {
         let mut visitor = InplaceVisitor::Visitor(visitor);
         let result = self.dyn_struct_variant(fields, &mut visitor);
-        visitor.expect(result).map_err(DeserializeError::from)
+        visitor.into_result(result)
     }
 }
